@@ -1,0 +1,94 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+export type AppMode = 'sandbox' | 'puzzle' | 'illusion' | 'multilight';
+
+export type ShapeType =
+  | 'cube'
+  | 'sphere'
+  | 'cylinder'
+  | 'rod'
+  | 'ring'
+  | 'cone'
+  | 'teapot'
+  | 'bird'
+  | 'chair'
+  | 'key'
+  | 'arch'
+  | 'spiral';
+
+export interface StudioObject {
+  id: string;
+  name: string;
+  shape: ShapeType;
+  position: [number, number, number];
+  rotation: [number, number, number]; // Euler angles in degrees
+  scale: [number, number, number];
+  color: string;
+  roughness?: number;
+  metalness?: number;
+  locked?: boolean;
+}
+
+export interface StudioLight {
+  id: string;
+  name: string;
+  type: 'spot' | 'point' | 'directional';
+  position: [number, number, number];
+  targetPosition: [number, number, number];
+  color: string;
+  intensity: number;
+  distance: number;
+  angle: number; // for spotlight in radians or degrees
+  penumbra: number; // soft shadow factor
+  enabled: boolean;
+  castShadow: boolean;
+}
+
+export interface PuzzleLevel {
+  id: number;
+  title: string;
+  difficulty: 'Beginner' | 'Intermediate' | 'Advanced' | 'Master';
+  description: string;
+  hint: string;
+  targetSilhouetteSvg?: string; // fallback SVG representation
+  initialObjects: StudioObject[];
+  initialLights: StudioLight[];
+  targetThreshold: number; // e.g. 78% IoU to pass
+  solutionNote: string;
+}
+
+export interface AnamorphicPreset {
+  id: string;
+  name: string;
+  description: string;
+  sweetSpot: {
+    position: [number, number, number];
+    lookAt: [number, number, number];
+    fov: number;
+  };
+  objects: StudioObject[];
+  revealColor: string;
+}
+
+export interface WebGpuStatus {
+  supported: boolean;
+  adapterName: string;
+  deviceVendor: string;
+  maxTextureDimension2D: number;
+  computeEnabled: boolean;
+  fallbackReason?: string;
+  executionMode: 'WebGPU Native (WGSL)' | 'WebGL2 Fallback + GPU Emulation';
+}
+
+export interface IoUResult {
+  score: number; // 0 to 100
+  intersectionCount: number;
+  unionCount: number;
+  targetCount: number;
+  currentCount: number;
+  method: 'WGSL Compute' | 'Direct Pixel Reduction';
+  computeTimeMs: number;
+}
