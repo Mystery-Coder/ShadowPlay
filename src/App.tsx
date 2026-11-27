@@ -12,6 +12,7 @@ import {
   WebGpuStatus,
   IoUResult,
   PuzzleScoreResult,
+  EnginePerformanceMetrics,
 } from './types';
 import { ShadowStudioEngine } from './engine/shadow-studio';
 import { detectWebGpuSupport } from './engine/webgpu-diagnostic';
@@ -25,6 +26,7 @@ import { BottomDock } from './components/BottomDock';
 import { PuzzleOverlay } from './components/PuzzleOverlay';
 import { AnamorphicOverlay } from './components/AnamorphicOverlay';
 import { MultiLightOverlay } from './components/MultiLightOverlay';
+import { PagpOverlay } from './components/PagpOverlay';
 import { GpuDiagnosticModal } from './components/GpuDiagnosticModal';
 import { ConceptExplainerModal } from './components/ConceptExplainerModal';
 import { WebXrModal } from './components/WebXrModal';
@@ -131,6 +133,9 @@ export default function App() {
   // App State
   const [mode, setMode] = useState<AppMode>('sandbox');
   const [gpuStatus, setGpuStatus] = useState<WebGpuStatus | null>(null);
+  const [performanceMetrics, setPerformanceMetrics] = useState<EnginePerformanceMetrics | null>(
+    null
+  );
   const [selectedObject, setSelectedObject] = useState<StudioObject | null>(null);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [activeCameraPreset, setActiveCameraPreset] = useState<string>('orbit');
@@ -207,6 +212,9 @@ export default function App() {
       onAnamorphicAccuracyChange: (acc) => {
         setAnamorphicAccuracy(acc);
       },
+      onPerformanceUpdate: (nextMetrics) => {
+        if (modeRef.current === 'pagp') setPerformanceMetrics(nextMetrics);
+      },
     });
 
     engineRef.current = engine;
@@ -271,7 +279,7 @@ export default function App() {
 
       const engine = engineRef.current;
       if (engine) {
-        engine.setPuzzleMode(true);
+        engine.setFlatLightFalloff(true);
 
         // Derive the ground truth from the engine's own projected shadow of the
         // intended arrangement. This guarantees that every target is achievable
@@ -300,7 +308,10 @@ export default function App() {
       modeRef.current = newMode;
       setMode(newMode);
       setSelectedObject(null);
-      engineRef.current?.setPuzzleMode(newMode === 'puzzle');
+      engineRef.current?.setFlatLightFalloff(
+        newMode === 'puzzle' || newMode === 'pagp'
+      );
+      engineRef.current?.setPerformanceMonitoring(newMode === 'pagp');
 
       if (newMode === 'puzzle') {
         loadPuzzleLevel(puzzleLevelIndex, 1);
@@ -361,6 +372,20 @@ export default function App() {
         setLights(RGB_STUDIO_LIGHTS);
         engine.setCameraPreset('wall_front');
         setActiveCameraPreset('wall_front');
+      } else if (newMode === 'pagp') {
+        // Keep a representative studio scene, with the puzzle-level key light
+        // strength so the projected shadow stays dark and readable. The dock
+        // remains available here for adjusting objects and lights.
+        const pagpLights = cloneLights(DEFAULT_SANDBOX_LIGHTS).map((light) => ({
+          ...light,
+          intensity: 4.0,
+        }));
+        engine.setObjects(DEFAULT_SANDBOX_OBJECTS);
+        engine.setLights(pagpLights);
+        setObjects(DEFAULT_SANDBOX_OBJECTS);
+        setLights(pagpLights);
+        engine.setCameraPreset('orbit');
+        setActiveCameraPreset('orbit');
       }
     },
     [puzzleLevelIndex, anamorphicPresetIndex, loadPuzzleLevel]
@@ -731,6 +756,10 @@ export default function App() {
         />
       )}
 
+      {mode === 'pagp' && (
+        <PagpOverlay metrics={performanceMetrics} webGpuStatus={gpuStatus} />
+      )}
+
       {/* Bottom Collapsible Control Dock */}
       <BottomDock
         mode={mode}
@@ -751,7 +780,9 @@ export default function App() {
         onExportSceneJson={handleExportSceneJson}
         onImportSceneJson={handleImportSceneJson}
         activeCameraPreset={activeCameraPreset}
-        allowedShapes={mode === 'puzzle' ? PUZZLE_LEVELS[puzzleLevelIndex].allowedShapes : undefined}
+        allowedShapes={
+          mode === 'puzzle' ? PUZZLE_LEVELS[puzzleLevelIndex].allowedShapes : undefined
+        }
       />
 
       {/* Modals */}

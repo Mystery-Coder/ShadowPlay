@@ -15,6 +15,7 @@ import {
   Glasses,
   Camera,
   RotateCcw,
+  Gauge,
 } from 'lucide-react';
 
 interface HeaderBarProps {
@@ -116,6 +117,19 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
         >
           <Palette className="w-3.5 h-3.5" />
           <span>RGB Lights</span>
+        </button>
+
+        <button
+          onClick={() => onSetMode('pagp')}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            mode === 'pagp'
+              ? 'bg-gradient-to-r from-sky-600 to-cyan-500 text-white shadow-sm'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+          }`}
+          title="PAGP Performance and GPU Analytics Dashboard"
+        >
+          <Gauge className="w-3.5 h-3.5" />
+          <span>PAGP</span>
         </button>
       </nav>
 

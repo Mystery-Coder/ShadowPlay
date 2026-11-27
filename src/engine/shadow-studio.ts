@@ -7,7 +7,13 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { AppMode, StudioObject, StudioLight, ShapeType } from '../types';
+import {
+  AppMode,
+  EnginePerformanceMetrics,
+  StudioObject,
+  StudioLight,
+  ShapeType,
+} from '../types';
 import { createObjectMesh, createSpotlightRigModel } from './procedural-models';
 
 // Module-level reusable math instances (Zero-GC in render loop)
@@ -20,6 +26,7 @@ export interface StudioCallbacks {
   onObjectTransformChange: (obj: StudioObject) => void;
   onSilhouetteUpdate?: (currentPixels: Uint8Array, width: number, height: number) => void;
   onAnamorphicAccuracyChange?: (accuracy: number) => void;
+  onPerformanceUpdate?: (metrics: EnginePerformanceMetrics) => void;
 }
 
 export class ShadowStudioEngine {
@@ -60,7 +67,7 @@ export class ShadowStudioEngine {
   /** Studio decor hidden while capturing the projection wall. */
   private captureDecor: THREE.Object3D[] = [];
   /** Puzzle mode trades studio fill light for high-contrast projected shadows. */
-  private puzzleMode = false;
+  private flatLightFalloff = false;
 
   // Anamorphic Sweet Spot
   private anamorphicSweetSpot: { pos: THREE.Vector3; lookAt: THREE.Vector3 } | null = null;
@@ -71,6 +78,22 @@ export class ShadowStudioEngine {
   private isDestroyed = false;
   private raycaster = new THREE.Raycaster();
   private mouse = new THREE.Vector2();
+
+  // PAGP telemetry: rolling frame samples + optional WebGL2 GPU timer queries.
+  private frameTimes: number[] = [];
+  private cpuTimes: number[] = [];
+  private captureTimes: number[] = [];
+  private shadowTimes: number[] = [];
+  private drawCalls: number[] = [];
+  private triangles: number[] = [];
+  private lastFrameTimestamp = 0;
+  private lastPerformanceEmit = 0;
+  private gpuTimerExtension: any = null;
+  private glContext: WebGL2RenderingContext | null = null;
+  private pendingGpuQueries: WebGLQuery[] = [];
+  private latestGpuRenderTimeMs: number | null = null;
+  private shadowSubmitAccumulator = 0;
+  private performanceMonitoring = false;
 
   constructor(container: HTMLElement, callbacks: StudioCallbacks) {
     this.container = container;
@@ -100,6 +123,29 @@ export class ShadowStudioEngine {
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    // Measure cumulative draw calls per animation frame (main render + shadow
+    // passes + throttled silhouette captures).
+    this.renderer.info.autoReset = false;
+
+    // Optional GPU timestamp query for the main scene render. Devices without
+    // EXT_disjoint_timer_query_webgl2 fall back to CPU render timing.
+    const gl = this.renderer.getContext();
+    if (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) {
+      this.glContext = gl;
+      this.gpuTimerExtension = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    }
+
+    // Three issues shadow-map draws from this method. Wrapping it gives a
+    // focused CPU-submit timing without changing the render pipeline.
+    const shadowMap = this.renderer.shadowMap as any;
+    const originalShadowRender = shadowMap.render.bind(shadowMap);
+    shadowMap.render = (...args: any[]) => {
+      const started = performance.now();
+      const value = originalShadowRender(...args);
+      this.shadowSubmitAccumulator += performance.now() - started;
+      return value;
+    };
 
     container.appendChild(this.renderer.domElement);
 
@@ -515,7 +561,7 @@ export class ShadowStudioEngine {
     light.target.position.set(...data.targetPosition);
     light.angle = data.angle;
     light.penumbra = data.penumbra;
-    light.decay = this.puzzleMode ? 0 : 1.0;
+    light.decay = this.flatLightFalloff ? 0 : 1.0;
 
     // Update fixture model position & aim
     const fixture = this.lightFixturesGroup.getObjectByName(`Fixture_${data.id}`) as THREE.Group;
@@ -530,16 +576,21 @@ export class ShadowStudioEngine {
   }
 
   /**
-   * Puzzle mode only removes spotlight distance falloff so the projected shadow
-   * stays readable. The studio background and ambient fill remain identical to
-   * the other modes.
+   * Removes spotlight distance falloff so the projected shadow stays readable.
+   * Used by puzzle mode and by the PAGP dashboard's benchmark scene. The studio
+   * background and ambient fill remain identical to the other modes.
    */
-  public setPuzzleMode(enabled: boolean) {
-    if (this.puzzleMode === enabled) return;
-    this.puzzleMode = enabled;
+  public setFlatLightFalloff(enabled: boolean) {
+    if (this.flatLightFalloff === enabled) return;
+    this.flatLightFalloff = enabled;
     for (const light of this.lightsMap.values()) {
       light.decay = enabled ? 0 : 1.0;
     }
+  }
+
+  /** Enables capture timing even when no puzzle scorer is attached. */
+  public setPerformanceMonitoring(enabled: boolean) {
+    this.performanceMonitoring = enabled;
   }
 
   // --- Camera Views & Anamorphic Sweet Spot ---
@@ -751,10 +802,102 @@ export class ShadowStudioEngine {
     return this.renderer.domElement.toDataURL('image/png');
   }
 
+  // --- PAGP performance telemetry ---
+
+  private pollGpuRenderQueries() {
+    if (!this.glContext || !this.gpuTimerExtension) return;
+    const gl = this.glContext;
+    const ext = this.gpuTimerExtension;
+    const disjoint = Boolean(gl.getParameter(ext.GPU_DISJOINT_EXT));
+
+    while (
+      this.pendingGpuQueries.length > 0 &&
+      gl.getQueryParameter(this.pendingGpuQueries[0], gl.QUERY_RESULT_AVAILABLE)
+    ) {
+      const query = this.pendingGpuQueries.shift()!;
+      if (!disjoint) {
+        const nanoseconds = Number(gl.getQueryParameter(query, gl.QUERY_RESULT));
+        this.latestGpuRenderTimeMs = nanoseconds / 1_000_000;
+      }
+      gl.deleteQuery(query);
+    }
+
+    if (disjoint) {
+      for (const query of this.pendingGpuQueries) gl.deleteQuery(query);
+      this.pendingGpuQueries = [];
+      this.latestGpuRenderTimeMs = null;
+    }
+  }
+
+  private pushSample(samples: number[], value: number) {
+    samples.push(value);
+    if (samples.length > 180) samples.shift();
+  }
+
+  private emitPerformanceMetrics(
+    now: number,
+    frameTime: number,
+    cpuTime: number,
+    captureTime: number,
+    shadowTime: number,
+    drawCalls: number,
+    triangles: number
+  ) {
+    if (frameTime > 0) this.pushSample(this.frameTimes, frameTime);
+    this.pushSample(this.cpuTimes, cpuTime);
+    this.pushSample(this.captureTimes, captureTime);
+    this.pushSample(this.shadowTimes, shadowTime);
+    this.pushSample(this.drawCalls, drawCalls);
+    this.pushSample(this.triangles, triangles);
+
+    if (!this.callbacks.onPerformanceUpdate || now - this.lastPerformanceEmit < 500) return;
+    if (this.frameTimes.length === 0) return;
+    this.lastPerformanceEmit = now;
+
+    const average = (values: number[]) =>
+      values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+    const sorted = [...this.frameTimes].sort((a, b) => a - b);
+    const p95 =
+      sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * 0.95))] ?? 0;
+    const frameTimeAvgMs = average(this.frameTimes);
+
+    this.callbacks.onPerformanceUpdate({
+      fps: frameTimeAvgMs > 0 ? Math.round((1000 / frameTimeAvgMs) * 10) / 10 : 0,
+      frameTimeMs: Math.round(frameTime * 100) / 100,
+      frameTimeAvgMs: Math.round(frameTimeAvgMs * 100) / 100,
+      frameTimeMinMs: Math.round(sorted[0] * 100) / 100,
+      frameTimeMaxMs: Math.round(sorted[sorted.length - 1] * 100) / 100,
+      frameTimeP95Ms: Math.round(p95 * 100) / 100,
+      cpuTimeMs: Math.round(average(this.cpuTimes) * 100) / 100,
+      gpuRenderTimeMs:
+        this.latestGpuRenderTimeMs === null
+          ? null
+          : Math.round(this.latestGpuRenderTimeMs * 100) / 100,
+      gpuTimingSource:
+        this.latestGpuRenderTimeMs === null
+          ? 'CPU fallback (no timer query)'
+          : 'WebGL2 timer query',
+      shadowTimeMs: Math.round(average(this.shadowTimes) * 100) / 100,
+      captureTimeMs: Math.round(average(this.captureTimes) * 100) / 100,
+      drawCalls: Math.round(average(this.drawCalls)),
+      triangles: Math.round(average(this.triangles)),
+      sampleCount: this.frameTimes.length,
+      timestamp: now,
+    });
+  }
+
   // --- Main Tick Loop ---
 
-  private tick = () => {
+  private tick = (timestamp: number = performance.now()) => {
     if (this.isDestroyed) return;
+
+    this.pollGpuRenderQueries();
+
+    const frameStart = performance.now();
+    const frameTime = this.lastFrameTimestamp > 0 ? timestamp - this.lastFrameTimestamp : 0;
+    this.lastFrameTimestamp = timestamp;
+    this.shadowSubmitAccumulator = 0;
+    this.renderer.info.reset();
 
     // Camera preset animation with smooth damping
     if (this.cameraTargetPos && this.cameraTargetLookAt) {
@@ -776,13 +919,31 @@ export class ShadowStudioEngine {
     } else {
       this.controls.update();
     }
+    const cpuUpdateMs = performance.now() - frameStart;
 
-    // Render 3D Scene
+    // Render 3D Scene, optionally timed with a WebGL2 GPU timestamp query.
+    const renderStart = performance.now();
+    const gl = this.glContext;
+    const ext = this.gpuTimerExtension;
+    let query: WebGLQuery | null = null;
+    if (gl && ext && this.pendingGpuQueries.length < 4) {
+      query = gl.createQuery();
+      if (query) gl.beginQuery(ext.TIME_ELAPSED_EXT, query);
+    }
+
     this.renderer.render(this.scene, this.camera);
 
-    // Periodic silhouette extraction (throttled to every 6 frames ~ 10Hz to save GPU memory bandwidth)
+    if (query && gl && ext) {
+      gl.endQuery(ext.TIME_ELAPSED_EXT);
+      this.pendingGpuQueries.push(query);
+    }
+    const renderSubmitMs = performance.now() - renderStart;
+
+    // Periodic silhouette extraction (throttled to every 6 frames ~ 10Hz).
+    let captureMs = 0;
     this.silhouetteCounter++;
     if (this.silhouetteCounter % 6 === 0) {
+      const captureStart = performance.now();
       if (this.callbacks.onSilhouetteUpdate) {
         const pixels = this.captureShadowSilhouette();
         this.callbacks.onSilhouetteUpdate(
@@ -790,7 +951,10 @@ export class ShadowStudioEngine {
           this.silhouetteResolution,
           this.silhouetteResolution
         );
+      } else if (this.performanceMonitoring) {
+        this.captureShadowSilhouette();
       }
+      captureMs = performance.now() - captureStart;
 
       // Check anamorphic sweet spot accuracy if configured
       if (this.anamorphicSweetSpot && this.callbacks.onAnamorphicAccuracyChange) {
@@ -807,6 +971,17 @@ export class ShadowStudioEngine {
         this.callbacks.onAnamorphicAccuracyChange(accuracy);
       }
     }
+
+    const renderInfo = this.renderer.info.render;
+    this.emitPerformanceMetrics(
+      performance.now(),
+      frameTime,
+      cpuUpdateMs + renderSubmitMs + captureMs,
+      captureMs,
+      this.shadowSubmitAccumulator,
+      renderInfo.calls,
+      renderInfo.triangles
+    );
 
     this.animationFrameId = requestAnimationFrame(this.tick);
   };
@@ -837,6 +1012,12 @@ export class ShadowStudioEngine {
     this.transformControls.dispose();
     this.controls.dispose();
     this.silhouetteRenderTarget.dispose();
+    if (this.glContext) {
+      for (const query of this.pendingGpuQueries) {
+        this.glContext.deleteQuery(query);
+      }
+      this.pendingGpuQueries = [];
+    }
     this.renderer.dispose();
 
     if (this.renderer.domElement.parentElement) {

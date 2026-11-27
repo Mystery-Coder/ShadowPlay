@@ -3,7 +3,64 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type AppMode = 'sandbox' | 'puzzle' | 'illusion' | 'multilight';
+export type AppMode = 'sandbox' | 'puzzle' | 'illusion' | 'multilight' | 'pagp';
+
+/** Live renderer telemetry emitted by ShadowStudioEngine. */
+export interface EnginePerformanceMetrics {
+  fps: number;
+  frameTimeMs: number;
+  frameTimeAvgMs: number;
+  frameTimeMinMs: number;
+  frameTimeMaxMs: number;
+  frameTimeP95Ms: number;
+  cpuTimeMs: number;
+  gpuRenderTimeMs: number | null;
+  gpuTimingSource: 'WebGL2 timer query' | 'CPU fallback (no timer query)';
+  shadowTimeMs: number;
+  captureTimeMs: number;
+  drawCalls: number;
+  triangles: number;
+  sampleCount: number;
+  timestamp: number;
+}
+
+/** Result of one CPU/WebGPU IoU benchmark workload. */
+export interface IoUBenchmarkResult {
+  resolution: number;
+  workgroupSize: number;
+  pixels: number;
+  cpuTimeMs: number;
+  gpuTimeMs: number | null;
+  gpuWallTimeMs: number;
+  gpuTimingSource: 'WebGPU timestamp query' | 'submit + readback fallback';
+  speedup: number | null;
+  throughputMegapixelsPerSecond: number | null;
+  workgroups: number;
+  workgroupUtilization: number;
+  effectiveBandwidthGbps: number | null;
+  maskTrafficMb: number;
+  launchOverheadMs: number | null;
+  atomicOperations: number;
+  cpuScore: number;
+  gpuScore: number | null;
+  absoluteError: number | null;
+  intersectionCount: number;
+  unionCount: number;
+  error: string | null;
+}
+
+export interface PagpBenchmarkSummary {
+  supported: boolean;
+  timestampQueries: boolean;
+  adapterName: string;
+  results: IoUBenchmarkResult[];
+  validationErrors: number;
+  deviceLosses: number;
+  consistencySamples: number;
+  consistentSamples: number;
+  gpuDispatches: number;
+  ranAt: number;
+}
 
 export type ShapeType =
   | 'cube'
@@ -167,6 +224,7 @@ export interface WebGpuStatus {
   deviceVendor: string;
   maxTextureDimension2D: number;
   computeEnabled: boolean;
+  timestampQueries?: boolean;
   fallbackReason?: string;
   executionMode: 'WebGPU Native (WGSL)' | 'WebGL2 Fallback + GPU Emulation';
 }
