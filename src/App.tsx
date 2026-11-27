@@ -16,15 +16,84 @@ import { ShadowStudioEngine } from './engine/shadow-studio';
 import { detectWebGpuSupport, computeIoUScore } from './engine/webgpu-diagnostic';
 import { PUZZLE_LEVELS, drawTargetSilhouette } from './engine/puzzles';
 import { ANAMORPHIC_PRESETS } from './engine/anamorphic';
+import { applyLightPreset } from './engine/multi-light-presets';
+import { RGB_CHALLENGES } from './engine/rgb-challenges';
 
 import { HeaderBar } from './components/HeaderBar';
 import { BottomDock } from './components/BottomDock';
 import { PuzzleOverlay } from './components/PuzzleOverlay';
 import { AnamorphicOverlay } from './components/AnamorphicOverlay';
 import { MultiLightOverlay } from './components/MultiLightOverlay';
+import { RgbChallengeOverlay } from './components/RgbChallengeOverlay';
 import { GpuDiagnosticModal } from './components/GpuDiagnosticModal';
 import { ConceptExplainerModal } from './components/ConceptExplainerModal';
 import { WebXrModal } from './components/WebXrModal';
+
+/**
+ * Responsive placement for the two Multi-Light HUD cards. The overlays keep
+ * their own visual styling; this only stacks them on narrow screens and keeps
+ * the existing left/right split once both fixed-width cards can fit.
+ */
+const MULTI_LIGHT_HUD_LAYOUT_CSS = `
+  [data-multi-light-hud] > div {
+    pointer-events: auto;
+  }
+
+  @media (max-width: 767px) {
+    [data-multi-light-hud] {
+      top: 4rem;
+      right: 1rem;
+      bottom: 1rem;
+      left: 1rem;
+      overflow-y: auto;
+    }
+
+    [data-multi-light-hud] > div {
+      position: relative;
+      top: auto;
+      right: auto;
+      bottom: auto;
+      left: auto;
+      width: 100%;
+      max-width: none;
+      max-height: none;
+      overflow: visible;
+    }
+
+    [data-multi-light-hud] > div + div {
+      margin-top: 0.75rem;
+    }
+  }
+
+  @media (min-width: 768px) {
+    [data-multi-light-hud] {
+      top: 0;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      overflow: visible;
+    }
+
+    [data-multi-light-hud] > div {
+      top: 4rem;
+      bottom: auto;
+      max-height: calc(100vh - 5rem);
+      overflow-y: auto;
+    }
+
+    [data-multi-light-hud] > div:first-child {
+      right: auto;
+      left: 1rem;
+      width: 21rem;
+    }
+
+    [data-multi-light-hud] > div:last-child {
+      right: 1rem;
+      left: auto;
+      width: 20rem;
+    }
+  }
+`;
 
 // Default lights for sandbox mode
 const DEFAULT_SANDBOX_LIGHTS: StudioLight[] = [
@@ -75,52 +144,6 @@ const DEFAULT_SANDBOX_OBJECTS: StudioObject[] = [
   },
 ];
 
-// RGB Multi-Light Studio Preset
-const RGB_STUDIO_LIGHTS: StudioLight[] = [
-  {
-    id: 'light-red',
-    name: 'Red Spotlight',
-    type: 'spot',
-    position: [-1.8, 2.6, -5.2],
-    targetPosition: [0, 2.0, 6.0],
-    color: '#ff2222',
-    intensity: 2.5,
-    distance: 25,
-    angle: 0.75,
-    penumbra: 0.25,
-    enabled: true,
-    castShadow: true,
-  },
-  {
-    id: 'light-green',
-    name: 'Green Spotlight',
-    type: 'spot',
-    position: [0.0, 3.2, -5.5],
-    targetPosition: [0, 2.0, 6.0],
-    color: '#22ff22',
-    intensity: 2.5,
-    distance: 25,
-    angle: 0.75,
-    penumbra: 0.25,
-    enabled: true,
-    castShadow: true,
-  },
-  {
-    id: 'light-blue',
-    name: 'Blue Spotlight',
-    type: 'spot',
-    position: [1.8, 2.6, -5.2],
-    targetPosition: [0, 2.0, 6.0],
-    color: '#2266ff',
-    intensity: 2.8,
-    distance: 25,
-    angle: 0.75,
-    penumbra: 0.25,
-    enabled: true,
-    castShadow: true,
-  },
-];
-
 export default function App() {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<ShadowStudioEngine | null>(null);
@@ -145,6 +168,9 @@ export default function App() {
   // Anamorphic state
   const [anamorphicPresetIndex, setAnamorphicPresetIndex] = useState(0);
   const [anamorphicAccuracy, setAnamorphicAccuracy] = useState(0);
+
+  // RGB challenge state
+  const [rgbChallengeIndex, setRgbChallengeIndex] = useState(0);
 
   // Modals
   const [showGpuModal, setShowGpuModal] = useState(false);
@@ -223,6 +249,8 @@ export default function App() {
     const engine = engineRef.current;
     if (!engine) return;
 
+    engine.setMultiLightReducedAmbient(newMode === 'multilight');
+
     if (newMode === 'sandbox') {
       engine.setObjects(DEFAULT_SANDBOX_OBJECTS);
       engine.setLights(DEFAULT_SANDBOX_LIGHTS);
@@ -269,10 +297,11 @@ export default function App() {
           color: '#ffffff',
         },
       ];
+      const multiLights = applyLightPreset('rgb');
       engine.setObjects(multiObjects);
-      engine.setLights(RGB_STUDIO_LIGHTS);
+      engine.setLights(multiLights);
       setObjects(multiObjects);
-      setLights(RGB_STUDIO_LIGHTS);
+      setLights(multiLights);
       engine.setCameraPreset('wall_front');
       setActiveCameraPreset('wall_front');
     }
@@ -381,94 +410,9 @@ export default function App() {
   };
 
   const handleApplyColorPreset = (preset: 'rgb' | 'cmy' | 'sunset' | 'mono') => {
-    if (preset === 'rgb') {
-      const rgb = RGB_STUDIO_LIGHTS;
-      setLights(rgb);
-      engineRef.current?.setLights(rgb);
-    } else if (preset === 'cmy') {
-      const cmy: StudioLight[] = [
-        {
-          id: 'light-cyan',
-          name: 'Cyan Light',
-          type: 'spot',
-          position: [-1.8, 2.6, -5.2],
-          targetPosition: [0, 2.0, 6.0],
-          color: '#06b6d4',
-          intensity: 2.8,
-          distance: 25,
-          angle: 0.75,
-          penumbra: 0.25,
-          enabled: true,
-          castShadow: true,
-        },
-        {
-          id: 'light-magenta',
-          name: 'Magenta Light',
-          type: 'spot',
-          position: [0.0, 3.2, -5.5],
-          targetPosition: [0, 2.0, 6.0],
-          color: '#d946ef',
-          intensity: 2.8,
-          distance: 25,
-          angle: 0.75,
-          penumbra: 0.25,
-          enabled: true,
-          castShadow: true,
-        },
-        {
-          id: 'light-yellow',
-          name: 'Yellow Light',
-          type: 'spot',
-          position: [1.8, 2.6, -5.2],
-          targetPosition: [0, 2.0, 6.0],
-          color: '#eab308',
-          intensity: 2.8,
-          distance: 25,
-          angle: 0.75,
-          penumbra: 0.25,
-          enabled: true,
-          castShadow: true,
-        },
-      ];
-      setLights(cmy);
-      engineRef.current?.setLights(cmy);
-    } else if (preset === 'sunset') {
-      const sunset: StudioLight[] = [
-        {
-          id: 'light-amber',
-          name: 'Amber Glow',
-          type: 'spot',
-          position: [-2.0, 2.5, -5.0],
-          targetPosition: [0, 2.0, 6.0],
-          color: '#f59e0b',
-          intensity: 3.0,
-          distance: 25,
-          angle: 0.8,
-          penumbra: 0.3,
-          enabled: true,
-          castShadow: true,
-        },
-        {
-          id: 'light-rose',
-          name: 'Rose Backlight',
-          type: 'spot',
-          position: [2.0, 2.5, -5.0],
-          targetPosition: [0, 2.0, 6.0],
-          color: '#f43f5e',
-          intensity: 2.8,
-          distance: 25,
-          angle: 0.8,
-          penumbra: 0.3,
-          enabled: true,
-          castShadow: true,
-        },
-      ];
-      setLights(sunset);
-      engineRef.current?.setLights(sunset);
-    } else {
-      setLights(DEFAULT_SANDBOX_LIGHTS);
-      engineRef.current?.setLights(DEFAULT_SANDBOX_LIGHTS);
-    }
+    const presetLights = applyLightPreset(preset);
+    setLights(presetLights);
+    engineRef.current?.setLights(presetLights);
   };
 
   const handleToggleLight = (index: number) => {
@@ -607,11 +551,23 @@ export default function App() {
       )}
 
       {mode === 'multilight' && (
-        <MultiLightOverlay
-          lights={lights}
-          onApplyColorPreset={handleApplyColorPreset}
-          onToggleLight={handleToggleLight}
-        />
+        <>
+          <style>{MULTI_LIGHT_HUD_LAYOUT_CSS}</style>
+          <div className="pointer-events-none absolute z-20" data-multi-light-hud="">
+            <MultiLightOverlay
+              lights={lights}
+              onApplyColorPreset={handleApplyColorPreset}
+              onToggleLight={handleToggleLight}
+              onUpdateLight={handleUpdateLight}
+            />
+            <RgbChallengeOverlay
+              lights={lights}
+              challenges={RGB_CHALLENGES}
+              currentChallenge={RGB_CHALLENGES[rgbChallengeIndex] ?? RGB_CHALLENGES[0]}
+              onChallengeChange={(_, index) => setRgbChallengeIndex(index)}
+            />
+          </div>
+        </>
       )}
 
       {/* Bottom Collapsible Control Dock */}

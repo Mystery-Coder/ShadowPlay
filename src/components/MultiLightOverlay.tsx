@@ -11,15 +11,113 @@ interface MultiLightOverlayProps {
   lights: StudioLight[];
   onApplyColorPreset: (preset: 'rgb' | 'cmy' | 'sunset' | 'mono') => void;
   onToggleLight: (index: number) => void;
+  /**
+   * Optional until Step 6. Pass App's existing `handleUpdateLight(index, partial)`
+   * here to make the per-light property controls live.
+   */
+  onUpdateLight?: (index: number, patch: Partial<StudioLight>) => void;
 }
+
+type AxisIndex = 0 | 1 | 2;
+
+const HEX_PATTERN = /^#[\da-f]{6}$/i;
+const COLOR_INPUT_FALLBACK = '#000000';
+
+/** HTML colour inputs require `#rrggbb`; keep malformed stored values safe. */
+function toColorInputValue(hex: string): string {
+  if (typeof hex !== 'string') return COLOR_INPUT_FALLBACK;
+  const trimmed = hex.trim();
+  return HEX_PATTERN.test(trimmed) ? trimmed.toLowerCase() : COLOR_INPUT_FALLBACK;
+}
+
+function finiteOr(value: number, fallback = 0): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+interface VectorControlProps {
+  label: string;
+  values: [number, number, number];
+  disabled: boolean;
+  onChange: (axis: AxisIndex, value: number) => void;
+}
+
+/** Compact X/Y/Z numeric control group for a StudioLight vector property. */
+const VectorControl: React.FC<VectorControlProps> = ({ label, values, disabled, onChange }) => {
+  const axes: ReadonlyArray<{ label: string; axis: AxisIndex }> = [
+    { label: 'X', axis: 0 },
+    { label: 'Y', axis: 1 },
+    { label: 'Z', axis: 2 },
+  ];
+
+  return (
+    <div>
+      <span className="text-[10px] text-slate-400 block mb-1">{label}</span>
+      <div className="grid grid-cols-3 gap-1">
+        {axes.map(({ label: axisLabel, axis }) => (
+          <label key={axisLabel} className="block">
+            <span className="text-[9px] text-slate-500 block mb-0.5">{axisLabel}</span>
+            <input
+              type="number"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={finiteOr(values[axis])}
+              disabled={disabled}
+              title={disabled ? 'Requires onUpdateLight callback' : `${label} ${axisLabel}`}
+              onChange={(event) => {
+                const nextValue = Number.parseFloat(event.target.value);
+                if (Number.isFinite(nextValue)) onChange(axis, nextValue);
+              }}
+              className="w-full min-w-0 bg-slate-950/80 border border-slate-800 rounded-md px-1.5 py-1 text-[10px] text-slate-200 focus:outline-none focus:border-amber-600 disabled:opacity-40 disabled:cursor-not-allowed"
+            />
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 export const MultiLightOverlay: React.FC<MultiLightOverlayProps> = ({
   lights,
   onApplyColorPreset,
   onToggleLight,
+  onUpdateLight,
 }) => {
+  const canUpdateProperties = typeof onUpdateLight === 'function';
+
+  /** Send only the changed field; the parent merges it with the existing light. */
+  const updateLight = (index: number, patch: Partial<StudioLight>): void => {
+    onUpdateLight?.(index, patch);
+  };
+
+  /** Copy the existing tuple before changing one axis; never mutate light data. */
+  const updateVector = (
+    index: number,
+    light: StudioLight,
+    property: 'position' | 'targetPosition',
+    axis: AxisIndex,
+    value: number
+  ): void => {
+    const nextVector: [number, number, number] = [
+      light[property][0],
+      light[property][1],
+      light[property][2],
+    ];
+    nextVector[axis] = value;
+
+    if (property === 'position') {
+      updateLight(index, { position: nextVector });
+    } else {
+      updateLight(index, { targetPosition: nextVector });
+    }
+  };
+
   return (
-    <div className="absolute top-16 left-4 z-20 w-84 max-w-[calc(100vw-32px)] bg-slate-950/90 border border-slate-800/90 rounded-2xl p-4 shadow-2xl backdrop-blur-xl text-white">
+    <div className="absolute top-16 left-4 z-20 w-84 max-w-[calc(100vw-32px)] max-h-[calc(100vh-5rem)] overflow-y-auto bg-slate-950/90 border border-slate-800/90 rounded-2xl p-4 shadow-2xl backdrop-blur-xl text-white">
       {/* Header */}
       <div className="flex items-center gap-2 pb-2.5 mb-2.5 border-b border-slate-800">
         <div className="p-1.5 rounded-lg bg-amber-950/80 border border-amber-800 text-amber-400">
@@ -106,28 +204,119 @@ export const MultiLightOverlay: React.FC<MultiLightOverlayProps> = ({
         </div>
       </div>
 
-      {/* Active Light Sources Toggle */}
+      {/* Individual Light Controls */}
       <div>
-        <span className="text-[11px] font-semibold text-slate-400 block mb-1.5">
-          Active Spotlights in Virtual Rig
-        </span>
-        <div className="grid grid-cols-3 gap-1.5">
-          {lights.map((l, i) => (
-            <button
-              key={l.id}
-              onClick={() => onToggleLight(i)}
-              className={`p-1.5 rounded-lg border text-center transition-all ${
-                l.enabled
-                  ? 'bg-slate-900 border-slate-600 shadow-md'
-                  : 'bg-slate-950 border-slate-800 opacity-50'
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <Layers className="w-3.5 h-3.5 text-slate-400" />
+          <span className="text-[11px] font-semibold text-slate-400">
+            Individual Light Controls
+          </span>
+        </div>
+
+        {!canUpdateProperties && (
+          <p className="mb-2 text-[9px] leading-snug text-amber-400/80">
+            Property editing requires an onUpdateLight callback from the parent.
+          </p>
+        )}
+
+        <div className="space-y-2">
+          {lights.map((light, index) => (
+            <div
+              key={light.id}
+              className={`p-2.5 rounded-xl border transition-colors ${
+                light.enabled
+                  ? 'bg-slate-900/70 border-slate-700'
+                  : 'bg-slate-950/80 border-slate-800 opacity-70'
               }`}
             >
-              <div
-                className="w-3.5 h-3.5 rounded-full mx-auto mb-1 border border-white/20"
-                style={{ backgroundColor: l.color }}
-              />
-              <span className="text-[10px] font-bold block truncate">{l.name}</span>
-            </button>
+              {/* Light identity + existing enable/disable callback */}
+              <div className="flex items-center gap-2 mb-2">
+                <Lightbulb className="w-3.5 h-3.5 shrink-0 text-slate-400" />
+                <div
+                  className="w-3.5 h-3.5 shrink-0 rounded-full border border-white/20"
+                  style={{ backgroundColor: toColorInputValue(light.color) }}
+                />
+                <span className="text-[11px] font-bold truncate flex-1" title={light.name}>
+                  {light.name}
+                </span>
+                <span className="text-[9px] font-mono text-slate-400">
+                  {light.color}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onToggleLight(index)}
+                  aria-pressed={light.enabled}
+                  title={light.enabled ? `Disable ${light.name}` : `Enable ${light.name}`}
+                  className={`shrink-0 px-1.5 py-0.5 rounded-md text-[9px] font-bold border transition-colors ${
+                    light.enabled
+                      ? 'bg-emerald-950/70 border-emerald-700 text-emerald-300'
+                      : 'bg-slate-900 border-slate-700 text-slate-500'
+                  }`}
+                >
+                  {light.enabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                {/* Colour picker */}
+                <label className="flex items-center gap-2">
+                  <span className="w-12 text-[10px] text-slate-400">Colour</span>
+                  <input
+                    type="color"
+                    value={toColorInputValue(light.color)}
+                    disabled={!canUpdateProperties}
+                    title={canUpdateProperties ? 'Light colour' : 'Requires onUpdateLight callback'}
+                    onChange={(event) => updateLight(index, { color: event.target.value })}
+                    className="h-6 w-9 bg-transparent border border-slate-700 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                  />
+                  <span className="text-[10px] font-mono text-slate-300">
+                    {light.color}
+                  </span>
+                </label>
+
+                {/* Intensity slider with visible numeric value */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-slate-400">Intensity</span>
+                    <span className="text-[10px] font-mono text-amber-300">
+                      {finiteOr(light.intensity).toFixed(1)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={6}
+                    step={0.1}
+                    value={clamp(finiteOr(light.intensity), 0, 6)}
+                    disabled={!canUpdateProperties}
+                    title={canUpdateProperties ? 'Light intensity' : 'Requires onUpdateLight callback'}
+                    onChange={(event) => {
+                      const nextIntensity = Number.parseFloat(event.target.value);
+                      if (Number.isFinite(nextIntensity)) {
+                        updateLight(index, { intensity: nextIntensity });
+                      }
+                    }}
+                    className="w-full h-1.5 accent-amber-400 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                  />
+                </div>
+
+                {/* Position and target vectors are copied, never mutated. */}
+                <VectorControl
+                  label="Position"
+                  values={light.position}
+                  disabled={!canUpdateProperties}
+                  onChange={(axis, value) => updateVector(index, light, 'position', axis, value)}
+                />
+                <VectorControl
+                  label="Target / Direction"
+                  values={light.targetPosition}
+                  disabled={!canUpdateProperties}
+                  onChange={(axis, value) =>
+                    updateVector(index, light, 'targetPosition', axis, value)
+                  }
+                />
+              </div>
+            </div>
           ))}
         </div>
       </div>

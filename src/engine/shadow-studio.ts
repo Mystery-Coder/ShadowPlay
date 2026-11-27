@@ -15,6 +15,11 @@ const _vec3A = new THREE.Vector3();
 const _vec3B = new THREE.Vector3();
 const _color = new THREE.Color();
 
+// Reduced fill used only while the Multi-Light Studio is active. These values
+// attenuate existing ambient sources; they do not replace or dispose them.
+const MULTI_LIGHT_HEMI_INTENSITY = 0.06;
+const MULTI_LIGHT_ENVIRONMENT_INTENSITY = 0.25;
+
 export interface StudioCallbacks {
   onSelectObject: (obj: StudioObject | null) => void;
   onObjectTransformChange: (obj: StudioObject) => void;
@@ -39,6 +44,9 @@ export class ShadowStudioEngine {
   // Lights
   private lightsMap: Map<string, THREE.SpotLight> = new Map();
   private hemiLight: THREE.HemisphereLight;
+  // Captured at construction so reduced-ambient mode can restore exact defaults.
+  private normalHemiIntensity = 0.45;
+  private normalEnvironmentIntensity = 1;
 
   // Object Registry
   private objectsMap: Map<string, { model: THREE.Group; data: StudioObject }> = new Map();
@@ -174,6 +182,11 @@ export class ShadowStudioEngine {
     this.hemiLight = new THREE.HemisphereLight(0x38bdf8, 0x0f172a, 0.45);
     this.hemiLight.position.set(0, 10, 0);
     this.scene.add(this.hemiLight);
+
+    // Remember the real starting values (including Three.js's environment default)
+    // so Multi-Light mode can be switched off without affecting other modes.
+    this.normalHemiIntensity = this.hemiLight.intensity;
+    this.normalEnvironmentIntensity = this.scene.environmentIntensity;
 
     // 9. Offscreen Silhouette Capture Setup
     // Orthographic camera pointing straight at the backdrop screen at Z = 5.0 facing +Z (screen is at Z = 6.0)
@@ -440,19 +453,32 @@ export class ShadowStudioEngine {
 
   // --- Lighting Management ---
 
-  public setLights(lights: StudioLight[]) {
-    // Clear old lights and fixture models
-    for (const [, light] of this.lightsMap) {
+  /** Remove managed spotlights, their scene targets, and their shadow-map resources. */
+  private removeAllLights(): void {
+    for (const light of this.lightsMap.values()) {
       this.scene.remove(light);
-      if (light.target) this.scene.remove(light.target);
+      if (light.target.parent) {
+        light.target.parent.remove(light.target);
+      }
+      // SpotLight.dispose() also disposes the shadow render target.
+      light.dispose();
     }
     this.lightsMap.clear();
+  }
 
+  /** Dispose and remove all spotlight rig models. */
+  private clearLightFixtures(): void {
     while (this.lightFixturesGroup.children.length > 0) {
       const child = this.lightFixturesGroup.children[0];
       this.lightFixturesGroup.remove(child);
       this.disposeObjectHierarchy(child);
     }
+  }
+
+  public setLights(lights: StudioLight[]) {
+    // Clear old lights and fixture models
+    this.removeAllLights();
+    this.clearLightFixtures();
 
     for (const lightData of lights) {
       this.addOrUpdateLight(lightData);
@@ -460,18 +486,27 @@ export class ShadowStudioEngine {
   }
 
   public addOrUpdateLight(data: StudioLight) {
-    let light = this.lightsMap.get(data.id) as THREE.SpotLight;
+    // Fall back to the original rig defaults only for non-finite values.
+    // Zero is a meaningful value for penumbra/distance and must not be replaced.
+    const distance = Number.isFinite(data.distance) ? data.distance : 30;
+    const angle = Number.isFinite(data.angle) ? data.angle : 0.7;
+    const penumbra = Number.isFinite(data.penumbra) ? data.penumbra : 0.2;
+    const intensity =
+      Number.isFinite(data.intensity) && data.intensity > 0 ? data.intensity : 0;
+    const isEnabled = data.enabled === true;
+    const shouldCastShadow = isEnabled && data.castShadow === true;
+
+    let light = this.lightsMap.get(data.id);
 
     if (!light) {
       light = new THREE.SpotLight(
         new THREE.Color(data.color),
-        data.intensity,
-        data.distance || 30,
-        data.angle || 0.7,
-        data.penumbra || 0.2,
+        intensity,
+        distance,
+        angle,
+        penumbra,
         1.0
       );
-      light.castShadow = data.castShadow;
       light.shadow.mapSize.width = 2048;
       light.shadow.mapSize.height = 2048;
       light.shadow.camera.near = 0.5;
@@ -480,7 +515,6 @@ export class ShadowStudioEngine {
       light.shadow.normalBias = 0.02;
 
       this.scene.add(light);
-      this.scene.add(light.target);
       this.lightsMap.set(data.id, light);
 
       // Add visual studio spotlight rig
@@ -489,23 +523,68 @@ export class ShadowStudioEngine {
       this.lightFixturesGroup.add(fixture);
     }
 
-    // Update parameters
+    // A SpotLight aims at a separate Object3D; keep that target in the scene.
+    if (!light.target.parent) {
+      this.scene.add(light.target);
+    }
+
+    // Update all mutable parameters on the existing light object.
     light.color.set(data.color);
-    light.intensity = data.enabled ? data.intensity : 0;
+    light.intensity = isEnabled ? intensity : 0;
+    light.visible = isEnabled;
+    light.castShadow = shouldCastShadow;
     light.position.set(...data.position);
     light.target.position.set(...data.targetPosition);
-    light.angle = data.angle;
-    light.penumbra = data.penumbra;
+    light.distance = distance;
+    light.angle = angle;
+    light.penumbra = penumbra;
 
-    // Update fixture model position & aim
+    // Update fixture model position, lens colour and aim
     const fixture = this.lightFixturesGroup.getObjectByName(`Fixture_${data.id}`) as THREE.Group;
     if (fixture) {
       fixture.position.set(data.position[0], 0, data.position[2]);
+      this.updateFixtureLensColor(fixture, data.color);
       const head = fixture.getObjectByName('LightHead');
       if (head) {
         head.position.y = data.position[1];
         head.lookAt(data.targetPosition[0], data.targetPosition[1], data.targetPosition[2]);
       }
+    }
+  }
+
+  /** Keep the visible fixture emitter in sync with the light's configured colour. */
+  private updateFixtureLensColor(fixture: THREE.Group, colorHex: string): void {
+    fixture.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of materials) {
+        if (material instanceof THREE.MeshBasicMaterial) {
+          material.color.set(colorHex);
+        }
+      }
+    });
+  }
+
+  /**
+   * Enable or disable the reduced-ambient configuration used by the
+   * Multi-Light Studio. Disabling restores the exact values captured at
+   * construction, leaving Sandbox, Puzzle and Anamorphic modes unchanged.
+   *
+   * The shared PMREM environment texture is never removed or disposed; only
+   * Scene.environmentIntensity and the existing HemisphereLight are attenuated.
+   */
+  public setMultiLightReducedAmbient(enabled: boolean): void {
+    if (enabled) {
+      this.hemiLight.intensity = Math.min(this.normalHemiIntensity, MULTI_LIGHT_HEMI_INTENSITY);
+      this.scene.environmentIntensity = Math.min(
+        this.normalEnvironmentIntensity,
+        MULTI_LIGHT_ENVIRONMENT_INTENSITY
+      );
+    } else {
+      this.hemiLight.intensity = this.normalHemiIntensity;
+      this.scene.environmentIntensity = this.normalEnvironmentIntensity;
     }
   }
 
@@ -716,6 +795,9 @@ export class ShadowStudioEngine {
 
     window.removeEventListener('resize', this.onWindowResize);
     this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
+
+    this.removeAllLights();
+    this.clearLightFixtures();
 
     this.transformControls.dispose();
     this.controls.dispose();
