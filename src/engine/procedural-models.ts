@@ -14,16 +14,22 @@ export function createObjectMesh(shape: ShapeType, colorHex: string = '#cbd5e1')
   const group = new THREE.Group();
   group.name = `Shape_${shape}`;
 
+  const baseColor = new THREE.Color(colorHex);
+
   const material = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(colorHex),
-    roughness: 0.35,
-    metalness: 0.15,
+    color: baseColor,
+    emissive: baseColor.clone().multiplyScalar(0.28),
+    emissiveIntensity: 0.6,
+    roughness: 0.42,
+    metalness: 0.08,
   });
 
   const accentMaterial = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(colorHex).multiplyScalar(0.75),
-    roughness: 0.2,
-    metalness: 0.6,
+    color: baseColor.clone().multiplyScalar(0.78),
+    emissive: baseColor.clone().multiplyScalar(0.18),
+    emissiveIntensity: 0.5,
+    roughness: 0.3,
+    metalness: 0.25,
   });
 
   switch (shape) {

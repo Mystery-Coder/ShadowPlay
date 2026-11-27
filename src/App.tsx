@@ -11,10 +11,13 @@ import {
   ShapeType,
   WebGpuStatus,
   IoUResult,
+  PuzzleScoreResult,
 } from './types';
 import { ShadowStudioEngine } from './engine/shadow-studio';
-import { detectWebGpuSupport, computeIoUScore } from './engine/webgpu-diagnostic';
-import { PUZZLE_LEVELS, drawTargetSilhouette } from './engine/puzzles';
+import { detectWebGpuSupport } from './engine/webgpu-diagnostic';
+import { PUZZLE_LEVELS, cloneLights, cloneObjects } from './engine/puzzles';
+import { analyzeShadowMasks, computePuzzleScore, toIoUResult } from './engine/puzzle-scoring';
+import { validateShadowShape } from './engine/puzzle-validation';
 import { ANAMORPHIC_PRESETS } from './engine/anamorphic';
 
 import { HeaderBar } from './components/HeaderBar';
@@ -139,8 +142,16 @@ export default function App() {
   // Puzzle state
   const [puzzleLevelIndex, setPuzzleLevelIndex] = useState(0);
   const [currentShadowPixels, setCurrentShadowPixels] = useState<Uint8Array | null>(null);
+  const [targetShadowPixels, setTargetShadowPixels] = useState<Uint8Array | null>(null);
   const [iouResult, setIouResult] = useState<IoUResult | null>(null);
-  const targetSilhouetteBufferRef = useRef<Uint8ClampedArray | null>(null);
+  const [puzzleScore, setPuzzleScore] = useState<PuzzleScoreResult | null>(null);
+  const [puzzleAttempts, setPuzzleAttempts] = useState(1);
+  const [puzzleStartedAt, setPuzzleStartedAt] = useState(() => Date.now());
+  const [puzzleSolvedAt, setPuzzleSolvedAt] = useState<number | null>(null);
+  const [solutionRevealed, setSolutionRevealed] = useState(false);
+  const targetSilhouetteBufferRef = useRef<Uint8Array | null>(null);
+  const puzzleLevelRef = useRef(PUZZLE_LEVELS[0]);
+  const modeRef = useRef<AppMode>('sandbox');
 
   // Anamorphic state
   const [anamorphicPresetIndex, setAnamorphicPresetIndex] = useState(0);
@@ -171,16 +182,27 @@ export default function App() {
         setObjects((prev) => prev.map((o) => (o.id === obj.id ? { ...obj } : o)));
       },
       onSilhouetteUpdate: (pixels, width, height) => {
+        // The engine returns a fresh buffer on every capture.
         setCurrentShadowPixels(pixels);
 
-        // If in puzzle mode, evaluate IoU with target silhouette
-        if (targetSilhouetteBufferRef.current) {
-          computeIoUScore(pixels, targetSilhouetteBufferRef.current, width, height).then(
-            (result) => {
-              setIouResult(result);
-            }
-          );
-        }
+        // Only evaluate while a puzzle is active and a target mask exists.
+        if (modeRef.current !== 'puzzle' || !targetSilhouetteBufferRef.current) return;
+
+        const startedAt = performance.now();
+        const level = puzzleLevelRef.current;
+        const metrics = analyzeShadowMasks(
+          pixels,
+          targetSilhouetteBufferRef.current,
+          width,
+          height
+        );
+        const validation = validateShadowShape(metrics, level);
+        const result = computePuzzleScore(metrics, level, validation);
+        const computeTimeMs =
+          Math.round((performance.now() - startedAt) * 100) / 100;
+
+        setPuzzleScore(result);
+        setIouResult(toIoUResult(result, 'Direct Pixel Reduction', computeTimeMs));
       },
       onAnamorphicAccuracyChange: (acc) => {
         setAnamorphicAccuracy(acc);
@@ -197,98 +219,171 @@ export default function App() {
     };
   }, []);
 
-  // 3. Pre-render target silhouette buffer when puzzle level changes
+  // Keep the engine callback's refs in sync with React state.
   useEffect(() => {
-    if (mode === 'puzzle') {
-      const level = PUZZLE_LEVELS[puzzleLevelIndex];
-      const canvas = document.createElement('canvas');
-      canvas.width = 128;
-      canvas.height = 128;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        drawTargetSilhouette(ctx, level.id, 128, 128);
-        const imgData = ctx.getImageData(0, 0, 128, 128);
-        targetSilhouetteBufferRef.current = imgData.data;
-      }
-    } else {
-      targetSilhouetteBufferRef.current = null;
-      setIouResult(null);
-    }
+    modeRef.current = mode;
+  }, [mode]);
+
+  // 3. Keep the level ref in sync and clear stale scoring when leaving puzzles.
+  useEffect(() => {
+    puzzleLevelRef.current = PUZZLE_LEVELS[puzzleLevelIndex];
+    if (mode !== 'puzzle') targetSilhouetteBufferRef.current = null;
+    setIouResult(null);
+    setPuzzleScore(null);
   }, [mode, puzzleLevelIndex]);
 
-  // 4. Handle Mode Changes
-  const handleSetMode = useCallback((newMode: AppMode) => {
-    setMode(newMode);
-    setSelectedObject(null);
-    const engine = engineRef.current;
-    if (!engine) return;
-
-    if (newMode === 'sandbox') {
-      engine.setObjects(DEFAULT_SANDBOX_OBJECTS);
-      engine.setLights(DEFAULT_SANDBOX_LIGHTS);
-      setObjects(DEFAULT_SANDBOX_OBJECTS);
-      setLights(DEFAULT_SANDBOX_LIGHTS);
-      engine.setCameraPreset('orbit');
-      setActiveCameraPreset('orbit');
-    } else if (newMode === 'puzzle') {
-      const level = PUZZLE_LEVELS[puzzleLevelIndex];
-      engine.setObjects(level.initialObjects);
-      engine.setLights(level.initialLights);
-      setObjects(level.initialObjects);
-      setLights(level.initialLights);
-      engine.setCameraPreset('wall_front');
-      setActiveCameraPreset('wall_front');
-    } else if (newMode === 'illusion') {
-      const preset = ANAMORPHIC_PRESETS[anamorphicPresetIndex];
-      engine.setObjects(preset.objects);
-      engine.setLights(DEFAULT_SANDBOX_LIGHTS);
-      setObjects(preset.objects);
-      setLights(DEFAULT_SANDBOX_LIGHTS);
-      engine.setAnamorphicSweetSpot(preset.sweetSpot.position, preset.sweetSpot.lookAt);
-      engine.setCameraPreset('orbit');
-      setActiveCameraPreset('orbit');
-    } else if (newMode === 'multilight') {
-      // 3 overlapping colored lights + interesting sculpture
-      const multiObjects: StudioObject[] = [
-        {
-          id: 'ml-teapot',
-          name: 'Central Teapot',
-          shape: 'teapot',
-          position: [0, 0.8, 0],
-          rotation: [0, 45, 0],
-          scale: [1.2, 1.2, 1.2],
-          color: '#ffffff',
-        },
-        {
-          id: 'ml-arch',
-          name: 'Arch Gate',
-          shape: 'arch',
-          position: [0, 0.4, 0.9],
-          rotation: [0, 0, 0],
-          scale: [0.9, 0.9, 0.9],
-          color: '#ffffff',
-        },
-      ];
-      engine.setObjects(multiObjects);
-      engine.setLights(RGB_STUDIO_LIGHTS);
-      setObjects(multiObjects);
-      setLights(RGB_STUDIO_LIGHTS);
-      engine.setCameraPreset('wall_front');
-      setActiveCameraPreset('wall_front');
+  // 4. Freeze the solve time once the puzzle passes.
+  useEffect(() => {
+    if (mode === 'puzzle' && puzzleScore?.passed) {
+      setPuzzleSolvedAt((previous) => previous ?? Date.now());
     }
-  }, [puzzleLevelIndex, anamorphicPresetIndex]);
+  }, [mode, puzzleScore?.passed]);
+
+  /**
+   * Loads a puzzle level with a clean scene. Objects and lights are cloned so
+   * the engine's in-place transforms can never corrupt the level definition.
+   * `resetSession` is false for Reset, which restores only the scene and keeps
+   * the running timer, attempt count and solve state unchanged.
+   */
+  const loadPuzzleLevel = useCallback(
+    (index: number, attempts: number = 1, resetSession: boolean = true) => {
+      const safeIndex = Math.max(0, Math.min(PUZZLE_LEVELS.length - 1, index));
+      const level = PUZZLE_LEVELS[safeIndex];
+      const nextObjects = cloneObjects(level.initialObjects);
+      const nextLights = cloneLights(level.initialLights);
+
+      modeRef.current = 'puzzle';
+      puzzleLevelRef.current = level;
+
+      setPuzzleLevelIndex(safeIndex);
+      setObjects(nextObjects);
+      setLights(nextLights);
+      setSelectedObject(null);
+      setCurrentShadowPixels(null);
+      setIouResult(null);
+      setPuzzleScore(null);
+      if (resetSession) {
+        setPuzzleAttempts(attempts);
+        setPuzzleStartedAt(Date.now());
+        setPuzzleSolvedAt(null);
+        setSolutionRevealed(false);
+      }
+
+      const engine = engineRef.current;
+      if (engine) {
+        engine.setPuzzleMode(true);
+
+        // Derive the ground truth from the engine's own projected shadow of the
+        // intended arrangement. This guarantees that every target is achievable
+        // and that target/live masks share exactly the same orientation.
+        engine.setLights(cloneLights(level.solutionLights));
+        engine.setObjects(cloneObjects(level.solutionObjects));
+        const targetMask = engine.captureShadowSilhouette();
+        targetSilhouetteBufferRef.current = targetMask;
+        setTargetShadowPixels(targetMask);
+
+        engine.setLights(nextLights);
+        engine.setObjects(nextObjects);
+        engine.setCameraPreset('puzzle_overview');
+      } else {
+        targetSilhouetteBufferRef.current = null;
+        setTargetShadowPixels(null);
+      }
+      setActiveCameraPreset('puzzle_overview');
+    },
+    []
+  );
+
+  // 4. Handle Mode Changes
+  const handleSetMode = useCallback(
+    (newMode: AppMode) => {
+      modeRef.current = newMode;
+      setMode(newMode);
+      setSelectedObject(null);
+      engineRef.current?.setPuzzleMode(newMode === 'puzzle');
+
+      if (newMode === 'puzzle') {
+        loadPuzzleLevel(puzzleLevelIndex, 1);
+        return;
+      }
+
+      // Leaving puzzle mode: clear the evaluation state.
+      targetSilhouetteBufferRef.current = null;
+      setTargetShadowPixels(null);
+      setIouResult(null);
+      setPuzzleScore(null);
+      setCurrentShadowPixels(null);
+
+      const engine = engineRef.current;
+      if (!engine) return;
+
+      if (newMode === 'sandbox') {
+        engine.setObjects(DEFAULT_SANDBOX_OBJECTS);
+        engine.setLights(DEFAULT_SANDBOX_LIGHTS);
+        setObjects(DEFAULT_SANDBOX_OBJECTS);
+        setLights(DEFAULT_SANDBOX_LIGHTS);
+        engine.setCameraPreset('orbit');
+        setActiveCameraPreset('orbit');
+      } else if (newMode === 'illusion') {
+        const preset = ANAMORPHIC_PRESETS[anamorphicPresetIndex];
+        engine.setObjects(preset.objects);
+        engine.setLights(DEFAULT_SANDBOX_LIGHTS);
+        setObjects(preset.objects);
+        setLights(DEFAULT_SANDBOX_LIGHTS);
+        engine.setAnamorphicSweetSpot(preset.sweetSpot.position, preset.sweetSpot.lookAt);
+        engine.setCameraPreset('orbit');
+        setActiveCameraPreset('orbit');
+      } else if (newMode === 'multilight') {
+        // 3 overlapping colored lights + interesting sculpture
+        const multiObjects: StudioObject[] = [
+          {
+            id: 'ml-teapot',
+            name: 'Central Teapot',
+            shape: 'teapot',
+            position: [0, 0.8, 0],
+            rotation: [0, 45, 0],
+            scale: [1.2, 1.2, 1.2],
+            color: '#ffffff',
+          },
+          {
+            id: 'ml-arch',
+            name: 'Arch Gate',
+            shape: 'arch',
+            position: [0, 0.4, 0.9],
+            rotation: [0, 0, 0],
+            scale: [0.9, 0.9, 0.9],
+            color: '#ffffff',
+          },
+        ];
+        engine.setObjects(multiObjects);
+        engine.setLights(RGB_STUDIO_LIGHTS);
+        setObjects(multiObjects);
+        setLights(RGB_STUDIO_LIGHTS);
+        engine.setCameraPreset('wall_front');
+        setActiveCameraPreset('wall_front');
+      }
+    },
+    [puzzleLevelIndex, anamorphicPresetIndex, loadPuzzleLevel]
+  );
 
   // Handle puzzle level selection
-  const handleSelectPuzzleLevel = useCallback((index: number) => {
-    setPuzzleLevelIndex(index);
-    const level = PUZZLE_LEVELS[index];
-    if (engineRef.current) {
-      engineRef.current.setObjects(level.initialObjects);
-      engineRef.current.setLights(level.initialLights);
-      setObjects(level.initialObjects);
-      setLights(level.initialLights);
-      setSelectedObject(null);
-    }
+  const handleSelectPuzzleLevel = useCallback(
+    (index: number) => {
+      loadPuzzleLevel(index, 1);
+    },
+    [loadPuzzleLevel]
+  );
+
+  const handleResetPuzzle = useCallback(() => {
+    loadPuzzleLevel(puzzleLevelIndex, puzzleAttempts, false);
+  }, [loadPuzzleLevel, puzzleLevelIndex, puzzleAttempts]);
+
+  const handleRetryPuzzle = useCallback(() => {
+    loadPuzzleLevel(puzzleLevelIndex, puzzleAttempts + 1, true);
+  }, [loadPuzzleLevel, puzzleLevelIndex, puzzleAttempts]);
+
+  const handleRevealSolution = useCallback(() => {
+    setSolutionRevealed(true);
   }, []);
 
   // Handle anamorphic preset selection
@@ -354,6 +449,13 @@ export default function App() {
 
   const handleAddObject = (shape: ShapeType) => {
     if (!engineRef.current) return;
+
+    // Puzzle levels only allow shapes that make sense for the challenge.
+    if (mode === 'puzzle') {
+      const allowed = PUZZLE_LEVELS[puzzleLevelIndex].allowedShapes;
+      if (!allowed.includes(shape)) return;
+    }
+
     const newObj: StudioObject = {
       id: `obj-${Date.now()}`,
       name: `New ${shape.charAt(0).toUpperCase() + shape.slice(1)}`,
@@ -477,7 +579,7 @@ export default function App() {
 
   // Camera presets
   const handleSetCameraPreset = (
-    preset: 'orbit' | 'wall_front' | 'light_pov' | 'top_down' | 'anamorphic_peep'
+    preset: 'orbit' | 'wall_front' | 'light_pov' | 'top_down' | 'anamorphic_peep' | 'puzzle_overview'
   ) => {
     setActiveCameraPreset(preset);
     engineRef.current?.setCameraPreset(preset);
@@ -532,6 +634,10 @@ export default function App() {
   };
 
   const handleResetScene = () => {
+    if (mode === 'puzzle') {
+      handleResetPuzzle();
+      return;
+    }
     handleSetMode(mode);
   };
 
@@ -589,9 +695,20 @@ export default function App() {
           totalLevels={PUZZLE_LEVELS.length}
           onSelectLevel={handleSelectPuzzleLevel}
           currentShadowPixels={currentShadowPixels}
+          targetShadowPixels={targetShadowPixels}
           resolution={128}
           iouResult={iouResult}
-          onNextLevel={() => handleSelectPuzzleLevel(Math.min(PUZZLE_LEVELS.length - 1, puzzleLevelIndex + 1))}
+          puzzleScore={puzzleScore}
+          attempts={puzzleAttempts}
+          startedAt={puzzleStartedAt}
+          solvedAt={puzzleSolvedAt}
+          solutionRevealed={solutionRevealed}
+          onReset={handleResetPuzzle}
+          onRetry={handleRetryPuzzle}
+          onRevealSolution={handleRevealSolution}
+          onNextLevel={() =>
+            handleSelectPuzzleLevel(Math.min(PUZZLE_LEVELS.length - 1, puzzleLevelIndex + 1))
+          }
         />
       )}
 
@@ -634,6 +751,7 @@ export default function App() {
         onExportSceneJson={handleExportSceneJson}
         onImportSceneJson={handleImportSceneJson}
         activeCameraPreset={activeCameraPreset}
+        allowedShapes={mode === 'puzzle' ? PUZZLE_LEVELS[puzzleLevelIndex].allowedShapes : undefined}
       />
 
       {/* Modals */}

@@ -53,8 +53,14 @@ export class ShadowStudioEngine {
   private silhouetteCamera: THREE.OrthographicCamera;
   private silhouetteRenderTarget: THREE.WebGLRenderTarget;
   private silhouettePixels: Uint8Array;
+  private silhouetteReferencePixels: Uint8Array;
+  private silhouetteMaskPixels: Uint8Array;
   private silhouetteResolution = 128;
   private silhouetteCounter = 0;
+  /** Studio decor hidden while capturing the projection wall. */
+  private captureDecor: THREE.Object3D[] = [];
+  /** Puzzle mode trades studio fill light for high-contrast projected shadows. */
+  private puzzleMode = false;
 
   // Anamorphic Sweet Spot
   private anamorphicSweetSpot: { pos: THREE.Vector3; lookAt: THREE.Vector3 } | null = null;
@@ -187,8 +193,8 @@ export class ShadowStudioEngine {
       0.1,
       5.0
     );
-    this.silhouetteCamera.position.set(0, 2.2, 5.0);
-    this.silhouetteCamera.lookAt(0, 2.2, 6.0);
+    this.silhouetteCamera.position.set(0, 2.4, 5.0);
+    this.silhouetteCamera.lookAt(0, 2.4, 6.0);
 
     this.silhouetteRenderTarget = new THREE.WebGLRenderTarget(
       this.silhouetteResolution,
@@ -199,7 +205,10 @@ export class ShadowStudioEngine {
         colorSpace: THREE.SRGBColorSpace,
       }
     );
-    this.silhouettePixels = new Uint8Array(this.silhouetteResolution * this.silhouetteResolution * 4);
+    const silhouetteBufferSize = this.silhouetteResolution * this.silhouetteResolution * 4;
+    this.silhouettePixels = new Uint8Array(silhouetteBufferSize);
+    this.silhouetteReferencePixels = new Uint8Array(silhouetteBufferSize);
+    this.silhouetteMaskPixels = new Uint8Array(silhouetteBufferSize);
 
     // Event listeners
     window.addEventListener('resize', this.onWindowResize);
@@ -253,6 +262,7 @@ export class ShadowStudioEngine {
     floor.receiveShadow = true;
     floor.position.y = -0.01;
     this.scene.add(floor);
+    this.captureDecor.push(floor);
 
     // Turntable Pedestal in center
     const pedestalGeo = new THREE.CylinderGeometry(2.2, 2.4, 0.15, 48);
@@ -265,6 +275,7 @@ export class ShadowStudioEngine {
     pedestal.position.y = 0.075;
     pedestal.receiveShadow = true;
     this.scene.add(pedestal);
+    this.captureDecor.push(pedestal);
 
     // Pedestal glow trim ring
     const trimGeo = new THREE.TorusGeometry(2.22, 0.02, 16, 64);
@@ -273,6 +284,7 @@ export class ShadowStudioEngine {
     trim.rotation.x = Math.PI / 2;
     trim.position.y = 0.15;
     this.scene.add(trim);
+    this.captureDecor.push(trim);
 
     return pedestal;
   }
@@ -318,6 +330,8 @@ export class ShadowStudioEngine {
     const frameRight = new THREE.Mesh(new THREE.BoxGeometry(0.15, screenHeight + 0.2, 0.2), frameMat);
     frameRight.position.set(screenWidth / 2 + 0.075, 2.4, 6.0);
     this.scene.add(frameRight);
+
+    this.captureDecor.push(frameTop, frameBottom, frameLeft, frameRight);
 
     return wall;
   }
@@ -393,11 +407,16 @@ export class ShadowStudioEngine {
     const entry = this.objectsMap.get(id);
     if (!entry) return;
     entry.data.color = colorHex;
+    const color = new THREE.Color(colorHex);
     entry.model.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
         const mesh = child as THREE.Mesh;
-        if (mesh.material && (mesh.material as THREE.MeshStandardMaterial).color) {
-          (mesh.material as THREE.MeshStandardMaterial).color.set(colorHex);
+        const material = mesh.material as THREE.MeshStandardMaterial | undefined;
+        if (material?.color) {
+          material.color.copy(color);
+          if (material.emissive) {
+            material.emissive.copy(color).multiplyScalar(0.28);
+          }
         }
       }
     });
@@ -496,6 +515,7 @@ export class ShadowStudioEngine {
     light.target.position.set(...data.targetPosition);
     light.angle = data.angle;
     light.penumbra = data.penumbra;
+    light.decay = this.puzzleMode ? 0 : 1.0;
 
     // Update fixture model position & aim
     const fixture = this.lightFixturesGroup.getObjectByName(`Fixture_${data.id}`) as THREE.Group;
@@ -509,10 +529,23 @@ export class ShadowStudioEngine {
     }
   }
 
+  /**
+   * Puzzle mode only removes spotlight distance falloff so the projected shadow
+   * stays readable. The studio background and ambient fill remain identical to
+   * the other modes.
+   */
+  public setPuzzleMode(enabled: boolean) {
+    if (this.puzzleMode === enabled) return;
+    this.puzzleMode = enabled;
+    for (const light of this.lightsMap.values()) {
+      light.decay = enabled ? 0 : 1.0;
+    }
+  }
+
   // --- Camera Views & Anamorphic Sweet Spot ---
 
   public setCameraPreset(
-    preset: 'orbit' | 'wall_front' | 'light_pov' | 'top_down' | 'anamorphic_peep'
+    preset: 'orbit' | 'wall_front' | 'light_pov' | 'top_down' | 'anamorphic_peep' | 'puzzle_overview'
   ) {
     switch (preset) {
       case 'orbit':
@@ -537,6 +570,10 @@ export class ShadowStudioEngine {
       case 'top_down':
         this.animateCameraTo(new THREE.Vector3(0, 9.5, 0.5), new THREE.Vector3(0, 0, 0.5));
         break;
+      case 'puzzle_overview':
+        // Pull back far enough to frame the spotlight, the objects and the screen together.
+        this.animateCameraTo(new THREE.Vector3(0, 6.2, -10.5), new THREE.Vector3(0, 2.0, 0.5));
+        break;
       case 'anamorphic_peep':
         if (this.anamorphicSweetSpot) {
           this.animateCameraTo(this.anamorphicSweetSpot.pos, this.anamorphicSweetSpot.lookAt);
@@ -559,24 +596,104 @@ export class ShadowStudioEngine {
 
   // --- Silhouette Extraction for Puzzle Mode ---
 
+  /**
+   * Captures the actual shadow projected onto the wall.
+   *
+   * A reference frame (wall lit, sculpture hidden) is compared with the live
+   * frame (wall + projected shadow). The difference is the real shadow mask,
+   * which is far more reliable than assuming "dark pixel = shadow" when the
+   * studio has ambient fill light.
+   */
   public captureShadowSilhouette(): Uint8Array {
-    // Hide everything except the wallMesh and the cast shadows
-    // Render from silhouetteCamera into silhouetteRenderTarget
     const currentRenderTarget = this.renderer.getRenderTarget();
+    const previousBackground = this.scene.background;
+    const previousFog = this.scene.fog;
+    const previousClearColor = new THREE.Color();
+    this.renderer.getClearColor(previousClearColor);
+    const previousClearAlpha = this.renderer.getClearAlpha();
 
-    this.renderer.setRenderTarget(this.silhouetteRenderTarget);
-    this.renderer.render(this.scene, this.silhouetteCamera);
-    this.renderer.readRenderTargetPixels(
-      this.silhouetteRenderTarget,
-      0,
-      0,
-      this.silhouetteResolution,
-      this.silhouetteResolution,
-      this.silhouettePixels
-    );
-    this.renderer.setRenderTarget(currentRenderTarget);
+    const helper = this.transformControls.getHelper();
+    const previousHelperVisible = helper.visible;
+    const previousFixturesVisible = this.lightFixturesGroup.visible;
+    const previousObjectsVisible = this.objectGroup.visible;
+    const previousDecorVisibility = this.captureDecor.map((object) => object.visible);
 
-    return this.silhouettePixels;
+    this.scene.background = new THREE.Color(0xffffff);
+    this.scene.fog = null;
+    this.renderer.setClearColor(0xffffff, 1);
+    for (const object of this.captureDecor) object.visible = false;
+    this.lightFixturesGroup.visible = false;
+    helper.visible = false;
+
+    try {
+      // 1. Reference frame: the lit wall with no sculpture in front of it.
+      this.objectGroup.visible = false;
+      this.renderer.setRenderTarget(this.silhouetteRenderTarget);
+      this.renderer.render(this.scene, this.silhouetteCamera);
+      this.renderer.readRenderTargetPixels(
+        this.silhouetteRenderTarget,
+        0,
+        0,
+        this.silhouetteResolution,
+        this.silhouetteResolution,
+        this.silhouetteReferencePixels
+      );
+
+      // 2. Live frame: the same wall with the sculpture's projected shadows.
+      this.objectGroup.visible = true;
+      this.renderer.render(this.scene, this.silhouetteCamera);
+      this.renderer.readRenderTargetPixels(
+        this.silhouetteRenderTarget,
+        0,
+        0,
+        this.silhouetteResolution,
+        this.silhouetteResolution,
+        this.silhouettePixels
+      );
+
+      // 3. Difference -> binary white-background / black-shadow mask.
+      //    readRenderTargetPixels returns rows bottom-first, while the target
+      //    canvas is top-first, so flip vertically before scoring/displaying.
+      const width = this.silhouetteResolution;
+      const totalPixels = width * width;
+      for (let i = 0; i < totalPixels; i++) {
+        const sourceIndex = i * 4;
+        const sourceX = i % width;
+        const sourceY = Math.floor(i / width);
+        const destinationIndex = ((width - 1 - sourceY) * width + sourceX) * 4;
+
+        const referenceLuminance =
+          0.2126 * this.silhouetteReferencePixels[sourceIndex] +
+          0.7152 * this.silhouetteReferencePixels[sourceIndex + 1] +
+          0.0722 * this.silhouetteReferencePixels[sourceIndex + 2];
+        const currentLuminance =
+          0.2126 * this.silhouettePixels[sourceIndex] +
+          0.7152 * this.silhouettePixels[sourceIndex + 1] +
+          0.0722 * this.silhouettePixels[sourceIndex + 2];
+
+        // Only a genuine darkening caused by geometry counts as a shadow.
+        const isShadow = referenceLuminance - currentLuminance > 6;
+        const value = isShadow ? 0 : 255;
+        this.silhouetteMaskPixels[destinationIndex] = value;
+        this.silhouetteMaskPixels[destinationIndex + 1] = value;
+        this.silhouetteMaskPixels[destinationIndex + 2] = value;
+        this.silhouetteMaskPixels[destinationIndex + 3] = 255;
+      }
+    } finally {
+      this.objectGroup.visible = previousObjectsVisible;
+      this.lightFixturesGroup.visible = previousFixturesVisible;
+      helper.visible = previousHelperVisible;
+      this.captureDecor.forEach((object, index) => {
+        object.visible = previousDecorVisibility[index];
+      });
+      this.scene.background = previousBackground;
+      this.scene.fog = previousFog;
+      this.renderer.setClearColor(previousClearColor, previousClearAlpha);
+      this.renderer.setRenderTarget(currentRenderTarget);
+    }
+
+    // Copy so React always receives a fresh buffer (the internal one is reused).
+    return this.silhouetteMaskPixels.slice();
   }
 
   // --- Raycasting / Object Selection ---

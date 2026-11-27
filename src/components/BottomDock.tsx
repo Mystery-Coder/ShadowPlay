@@ -43,6 +43,8 @@ interface BottomDockProps {
   onExportSceneJson: () => void;
   onImportSceneJson: (e: React.ChangeEvent<HTMLInputElement>) => void;
   activeCameraPreset: string;
+  /** When provided, only these shapes can be spawned (used by puzzle levels). */
+  allowedShapes?: ShapeType[];
 }
 
 export const BottomDock: React.FC<BottomDockProps> = ({
@@ -61,6 +63,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   onExportSceneJson,
   onImportSceneJson,
   activeCameraPreset,
+  allowedShapes,
 }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState<'transform' | 'spawn' | 'lights' | 'camera' | 'file'>('transform');
@@ -79,6 +82,10 @@ export const BottomDock: React.FC<BottomDockProps> = ({
     { type: 'arch', label: 'Arch', desc: 'Roman portal' },
     { type: 'spiral', label: 'Spiral', desc: 'Helical curve' },
   ];
+
+  const availableShapes = allowedShapes
+    ? shapeList.filter((item) => allowedShapes.includes(item.type))
+    : shapeList;
 
   return (
     <div
@@ -468,12 +475,16 @@ export const BottomDock: React.FC<BottomDockProps> = ({
           <div>
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-slate-300">
-                Select a 3D Primitive or Composite Model to spawn onto the turntable:
+                {allowedShapes
+                  ? 'Puzzle-approved shapes for this challenge:'
+                  : 'Select a 3D Primitive or Composite Model to spawn onto the turntable:'}
               </span>
-              <span className="text-[11px] text-slate-500">Auto-pivoted & shadow casting</span>
+              <span className="text-[11px] text-slate-500">
+                {allowedShapes ? 'Restricted to keep the solution fair' : 'Auto-pivoted & shadow casting'}
+              </span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2">
-              {shapeList.map((item) => (
+              {availableShapes.map((item) => (
                 <button
                   key={item.type}
                   onClick={() => {
