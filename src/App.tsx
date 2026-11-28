@@ -368,6 +368,9 @@ export default function App() {
 				newMode === "puzzle" || newMode === "pagp",
 			);
 			engineRef.current?.setPerformanceMonitoring(newMode === "pagp");
+			engineRef.current?.setMultiLightReducedAmbient(
+				newMode === "multilight",
+			);
 
 			if (newMode === "puzzle") {
 				loadPuzzleLevel(puzzleLevelIndex, 1);
@@ -425,10 +428,11 @@ export default function App() {
 						color: "#ffffff",
 					},
 				];
+				const multiLights = applyLightPreset("rgb");
 				engine.setObjects(multiObjects);
-				engine.setLights(RGB_STUDIO_LIGHTS);
+				engine.setLights(multiLights);
 				setObjects(multiObjects);
-				setLights(RGB_STUDIO_LIGHTS);
+				setLights(multiLights);
 				engine.setCameraPreset("wall_front");
 				setActiveCameraPreset("wall_front");
 			} else if (newMode === "pagp") {

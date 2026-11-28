@@ -671,6 +671,23 @@ export class ShadowStudioEngine {
 		}
 	}
 
+	/** Keep the visible fixture emitter in sync with the light's configured colour. */
+	private updateFixtureLensColor(fixture: THREE.Group, colorHex: string): void {
+		fixture.traverse((child) => {
+			const mesh = child as THREE.Mesh;
+			if (!mesh.isMesh || !mesh.material) return;
+
+			const materials = Array.isArray(mesh.material)
+				? mesh.material
+				: [mesh.material];
+			for (const material of materials) {
+				if (material instanceof THREE.MeshBasicMaterial) {
+					material.color.set(colorHex);
+				}
+			}
+		});
+	}
+
 	/**
 	 * Removes spotlight distance falloff so the projected shadow stays readable.
 	 * Used by puzzle mode and by the PAGP dashboard's benchmark scene. The studio
@@ -687,6 +704,30 @@ export class ShadowStudioEngine {
 	/** Enables capture timing even when no puzzle scorer is attached. */
 	public setPerformanceMonitoring(enabled: boolean) {
 		this.performanceMonitoring = enabled;
+	}
+
+	/**
+	 * Enable or disable the reduced-ambient configuration used by the
+	 * Multi-Light Studio. Disabling restores the exact values captured at
+	 * construction, leaving Sandbox, Puzzle and Anamorphic modes unchanged.
+	 *
+	 * The shared PMREM environment texture is never removed or disposed; only
+	 * Scene.environmentIntensity and the existing HemisphereLight are attenuated.
+	 */
+	public setMultiLightReducedAmbient(enabled: boolean): void {
+		if (enabled) {
+			this.hemiLight.intensity = Math.min(
+				this.normalHemiIntensity,
+				MULTI_LIGHT_HEMI_INTENSITY,
+			);
+			this.scene.environmentIntensity = Math.min(
+				this.normalEnvironmentIntensity,
+				MULTI_LIGHT_ENVIRONMENT_INTENSITY,
+			);
+		} else {
+			this.hemiLight.intensity = this.normalHemiIntensity;
+			this.scene.environmentIntensity = this.normalEnvironmentIntensity;
+		}
 	}
 
 	// --- Camera Views & Anamorphic Sweet Spot ---
