@@ -205,17 +205,49 @@ export interface PuzzleScoreResult {
   metrics: SilhouetteMetrics;
 }
 
+/** Allowed error window for a preset's sweet-spot camera pose. */
+export interface AnamorphicTolerance {
+  /** Maximum camera position error in world units. */
+  position: number;
+  /** Maximum view-direction error in degrees. */
+  angleDeg: number;
+  /** Maximum vertical FOV error in degrees. */
+  fov: number;
+}
+
+export interface AnamorphicSweetSpot {
+  position: [number, number, number];
+  lookAt: [number, number, number];
+  fov: number;
+  tolerance: AnamorphicTolerance;
+}
+
+/**
+ * Live camera-alignment telemetry for anamorphic mode. Errors are raw values;
+ * accuracies are 0..100 and `accuracy` is the weighted blend used by the HUD.
+ */
+export interface AnamorphicViewMetrics {
+  positionError: number;
+  angleErrorDeg: number;
+  fovError: number;
+  positionAccuracy: number;
+  angleAccuracy: number;
+  fovAccuracy: number;
+  /** Weighted 0..100 alignment score (position 35%, angle 45%, FOV 20%). */
+  accuracy: number;
+  /** True when every error is inside the preset's tolerance window. */
+  withinTolerance: boolean;
+}
+
 export interface AnamorphicPreset {
   id: string;
   name: string;
   description: string;
-  sweetSpot: {
-    position: [number, number, number];
-    lookAt: [number, number, number];
-    fov: number;
-  };
+  sweetSpot: AnamorphicSweetSpot;
   objects: StudioObject[];
   revealColor: string;
+  /** Inline data-URI silhouette used by the target overlay. */
+  targetImage: string;
 }
 
 export interface WebGpuStatus {

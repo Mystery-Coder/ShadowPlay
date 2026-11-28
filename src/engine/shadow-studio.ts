@@ -8,6 +8,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import {
+	AnamorphicSweetSpot,
+	AnamorphicViewMetrics,
 	AppMode,
 	EnginePerformanceMetrics,
 	StudioObject,
@@ -15,6 +17,7 @@ import {
 	ShapeType,
 } from "../types";
 import { createObjectMesh, createSpotlightRigModel } from "./procedural-models";
+import { computeAnamorphicViewMetrics } from "./illusion-scoring";
 
 // Module-level reusable math instances (Zero-GC in render loop)
 const _vec3A = new THREE.Vector3();
@@ -34,7 +37,7 @@ export interface StudioCallbacks {
 		width: number,
 		height: number,
 	) => void;
-	onAnamorphicAccuracyChange?: (accuracy: number) => void;
+	onAnamorphicViewChange?: (metrics: AnamorphicViewMetrics) => void;
 	onPerformanceUpdate?: (metrics: EnginePerformanceMetrics) => void;
 }
 
@@ -69,6 +72,7 @@ export class ShadowStudioEngine {
 	// Camera animation target
 	private cameraTargetPos: THREE.Vector3 | null = null;
 	private cameraTargetLookAt: THREE.Vector3 | null = null;
+	private cameraTargetFov: number | null = null;
 	private cameraLookAtCurrent: THREE.Vector3 = new THREE.Vector3(0, 1.5, 0);
 
 	// Offscreen Silhouette Capture for Puzzle Evaluation
@@ -88,7 +92,12 @@ export class ShadowStudioEngine {
 	private anamorphicSweetSpot: {
 		pos: THREE.Vector3;
 		lookAt: THREE.Vector3;
+		fov: number;
+		tolerance: AnamorphicSweetSpot["tolerance"];
 	} | null = null;
+	private viewpointLocked = false;
+	private explorationMode = false;
+	private pendingLockOnArrival = false;
 
 	// Callbacks
 	private callbacks: StudioCallbacks;
@@ -746,6 +755,7 @@ export class ShadowStudioEngine {
 				this.animateCameraTo(
 					new THREE.Vector3(4.5, 3.2, 5.5),
 					new THREE.Vector3(0, 1.5, 0.5),
+					45,
 				);
 				break;
 			case "wall_front":
@@ -753,6 +763,7 @@ export class ShadowStudioEngine {
 				this.animateCameraTo(
 					new THREE.Vector3(0, 2.4, -0.5),
 					new THREE.Vector3(0, 2.4, 6.0),
+					45,
 				);
 				break;
 			case "light_pov": {
@@ -763,6 +774,7 @@ export class ShadowStudioEngine {
 					this.animateCameraTo(
 						new THREE.Vector3(lPos.x, lPos.y, lPos.z + 0.3),
 						new THREE.Vector3(0, 2.2, 6.0),
+						45,
 					);
 				}
 				break;
@@ -771,6 +783,7 @@ export class ShadowStudioEngine {
 				this.animateCameraTo(
 					new THREE.Vector3(0, 9.5, 0.5),
 					new THREE.Vector3(0, 0, 0.5),
+					45,
 				);
 				break;
 			case "puzzle_overview":
@@ -778,35 +791,92 @@ export class ShadowStudioEngine {
 				this.animateCameraTo(
 					new THREE.Vector3(0, 6.2, -10.5),
 					new THREE.Vector3(0, 2.0, 0.5),
+					45,
 				);
 				break;
 			case "anamorphic_peep":
 				if (this.anamorphicSweetSpot) {
-					this.animateCameraTo(
-						this.anamorphicSweetSpot.pos,
-						this.anamorphicSweetSpot.lookAt,
-					);
+					this.goToSweetSpot(false);
 				}
 				break;
 		}
 	}
 
-	public setAnamorphicSweetSpot(
-		pos: [number, number, number],
-		lookAt: [number, number, number],
-	) {
+	public setAnamorphicSweetSpot(spot: AnamorphicSweetSpot) {
 		this.anamorphicSweetSpot = {
-			pos: new THREE.Vector3(...pos),
-			lookAt: new THREE.Vector3(...lookAt),
+			pos: new THREE.Vector3(...spot.position),
+			lookAt: new THREE.Vector3(...spot.lookAt),
+			fov: spot.fov,
+			tolerance: { ...spot.tolerance },
 		};
+	}
+
+	public clearAnamorphicSweetSpot() {
+		this.anamorphicSweetSpot = null;
+		this.viewpointLocked = false;
+		this.explorationMode = false;
+		this.pendingLockOnArrival = false;
+		this.controls.autoRotate = false;
+		this.controls.enabled = true;
+	}
+
+	/** Smoothly moves to the configured sweet spot; optionally locks on arrival. */
+	public goToSweetSpot(lock: boolean = false) {
+		const spot = this.anamorphicSweetSpot;
+		if (!spot) return;
+		this.viewpointLocked = false;
+		this.controls.enabled = true;
+		this.pendingLockOnArrival = lock;
+		this.animateCameraTo(spot.pos, spot.lookAt, spot.fov);
+	}
+
+	public setViewpointLock(locked: boolean) {
+		this.viewpointLocked = locked;
+		this.controls.enabled = !locked;
+		this.pendingLockOnArrival = false;
+		if (!locked) return;
+
+		this.cameraTargetPos = null;
+		this.cameraTargetLookAt = null;
+		this.cameraTargetFov = null;
+
+		const spot = this.anamorphicSweetSpot;
+		if (!spot) return;
+		this.camera.position.copy(spot.pos);
+		this.cameraLookAtCurrent.copy(spot.lookAt);
+		this.controls.target.copy(spot.lookAt);
+		this.camera.fov = spot.fov;
+		this.camera.updateProjectionMatrix();
+		this.camera.lookAt(spot.lookAt);
+	}
+
+	/** Enables slow auto-orbit so the illusion can be inspected in 3D. */
+	public setExplorationMode(enabled: boolean) {
+		this.explorationMode = enabled;
+		this.controls.autoRotate = enabled;
+		this.controls.autoRotateSpeed = 1.1;
+		if (!enabled) return;
+
+		this.viewpointLocked = false;
+		this.pendingLockOnArrival = false;
+		this.controls.enabled = true;
+		this.cameraTargetPos = null;
+		this.cameraTargetLookAt = null;
+		this.cameraTargetFov = 45;
+	}
+
+	public setLightFixturesVisible(visible: boolean) {
+		this.lightFixturesGroup.visible = visible;
 	}
 
 	private animateCameraTo(
 		targetPos: THREE.Vector3,
 		targetLookAt: THREE.Vector3,
+		targetFov: number = 45,
 	) {
 		this.cameraTargetPos = targetPos.clone();
 		this.cameraTargetLookAt = targetLookAt.clone();
+		this.cameraTargetFov = targetFov;
 	}
 
 	// --- Silhouette Extraction for Puzzle Mode ---
@@ -1091,25 +1161,60 @@ export class ShadowStudioEngine {
 		this.shadowSubmitAccumulator = 0;
 		this.renderer.info.reset();
 
-		// Camera preset animation with smooth damping
-		if (this.cameraTargetPos && this.cameraTargetLookAt) {
+		// Camera animation, viewpoint lock and exploration orbit.
+		if (this.viewpointLocked && this.anamorphicSweetSpot) {
+			const spot = this.anamorphicSweetSpot;
+			this.camera.position.copy(spot.pos);
+			this.cameraLookAtCurrent.copy(spot.lookAt);
+			this.controls.target.copy(spot.lookAt);
+			this.camera.fov = spot.fov;
+			this.camera.updateProjectionMatrix();
+			this.camera.lookAt(spot.lookAt);
+		} else if (this.cameraTargetPos && this.cameraTargetLookAt) {
 			this.camera.position.lerp(this.cameraTargetPos, 0.08);
 			this.cameraLookAtCurrent.lerp(this.cameraTargetLookAt, 0.08);
 			this.controls.target.copy(this.cameraLookAtCurrent);
 			this.camera.lookAt(this.cameraLookAtCurrent);
 
+			const targetFov =
+				this.cameraTargetFov === null
+					? this.camera.fov
+					: this.cameraTargetFov;
+			if (this.cameraTargetFov !== null) {
+				this.camera.fov += (targetFov - this.camera.fov) * 0.12;
+				this.camera.updateProjectionMatrix();
+			}
+
 			if (
 				this.camera.position.distanceTo(this.cameraTargetPos) < 0.04 &&
 				this.cameraLookAtCurrent.distanceTo(this.cameraTargetLookAt) <
-					0.04
+					0.04 &&
+				Math.abs(this.camera.fov - targetFov) < 0.05
 			) {
 				this.camera.position.copy(this.cameraTargetPos);
 				this.cameraLookAtCurrent.copy(this.cameraTargetLookAt);
 				this.controls.target.copy(this.cameraLookAtCurrent);
+				this.camera.fov = targetFov;
+				this.camera.updateProjectionMatrix();
 				this.cameraTargetPos = null;
 				this.cameraTargetLookAt = null;
+				this.cameraTargetFov = null;
+				if (this.pendingLockOnArrival) {
+					this.pendingLockOnArrival = false;
+					this.viewpointLocked = true;
+					this.controls.enabled = false;
+				}
 			}
 		} else {
+			if (this.cameraTargetFov !== null) {
+				this.camera.fov +=
+					(this.cameraTargetFov - this.camera.fov) * 0.12;
+				if (Math.abs(this.cameraTargetFov - this.camera.fov) < 0.05) {
+					this.camera.fov = this.cameraTargetFov;
+					this.cameraTargetFov = null;
+				}
+				this.camera.updateProjectionMatrix();
+			}
 			this.controls.update();
 		}
 		const cpuUpdateMs = performance.now() - frameStart;
@@ -1148,31 +1253,37 @@ export class ShadowStudioEngine {
 				this.captureShadowSilhouette();
 			}
 			captureMs = performance.now() - captureStart;
+		}
 
-			// Check anamorphic sweet spot accuracy if configured
-			if (
-				this.anamorphicSweetSpot &&
-				this.callbacks.onAnamorphicAccuracyChange
-			) {
-				const dist = this.camera.position.distanceTo(
-					this.anamorphicSweetSpot.pos,
-				);
-				// Angle deviation
-				_vec3A
-					.subVectors(
-						this.anamorphicSweetSpot.lookAt,
-						this.camera.position,
-					)
-					.normalize();
+		// Anamorphic alignment telemetry (~10Hz, independent of silhouette work).
+		if (
+			this.silhouetteCounter % 6 === 0 &&
+			this.anamorphicSweetSpot &&
+			this.callbacks.onAnamorphicViewChange
+		) {
+			const spot = this.anamorphicSweetSpot;
+			const positionError = this.camera.position.distanceTo(spot.pos);
+
+			_vec3A.subVectors(spot.lookAt, spot.pos).normalize();
+			_vec3B.subVectors(this.cameraLookAtCurrent, this.camera.position);
+			if (_vec3B.lengthSq() < 1e-8) {
 				this.camera.getWorldDirection(_vec3B);
-				const angle = _vec3A.angleTo(_vec3B);
-
-				// Distance factor + Angle factor
-				const distFactor = Math.max(0, 1 - dist / 3.0);
-				const angleFactor = Math.max(0, 1 - angle / 0.5);
-				const accuracy = Math.round(distFactor * angleFactor * 100);
-				this.callbacks.onAnamorphicAccuracyChange(accuracy);
+			} else {
+				_vec3B.normalize();
 			}
+			const angleErrorDeg = THREE.MathUtils.radToDeg(
+				_vec3A.angleTo(_vec3B),
+			);
+			const fovError = Math.abs(this.camera.fov - spot.fov);
+
+			this.callbacks.onAnamorphicViewChange(
+				computeAnamorphicViewMetrics(
+					positionError,
+					angleErrorDeg,
+					fovError,
+					spot.tolerance,
+				),
+			);
 		}
 
 		const renderInfo = this.renderer.info.render;
