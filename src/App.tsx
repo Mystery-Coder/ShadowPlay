@@ -3,9 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, {
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	useCallback,
+} from "react";
 import {
 	AppMode,
+	AnamorphicViewMetrics,
 	StudioObject,
 	StudioLight,
 	ShapeType,
@@ -24,6 +31,10 @@ import {
 } from "./engine/puzzle-scoring";
 import { validateShadowShape } from "./engine/puzzle-validation";
 import { ANAMORPHIC_PRESETS } from "./engine/anamorphic";
+import {
+	computeObjectIntegrity,
+	finalizeIllusionScore,
+} from "./engine/illusion-scoring";
 import { applyLightPreset } from "./engine/multi-light-presets";
 import { RGB_CHALLENGES } from "./engine/rgb-challenges";
 
@@ -31,6 +42,7 @@ import { HeaderBar } from "./components/HeaderBar";
 import { BottomDock } from "./components/BottomDock";
 import { PuzzleOverlay } from "./components/PuzzleOverlay";
 import { AnamorphicOverlay } from "./components/AnamorphicOverlay";
+import { SweetSpotMarker } from "./components/SweetSpotMarker";
 import { MultiLightOverlay } from "./components/MultiLightOverlay";
 import { RgbChallengeOverlay } from "./components/RgbChallengeOverlay";
 import { PagpOverlay } from "./components/PagpOverlay";
@@ -122,6 +134,53 @@ const DEFAULT_SANDBOX_LIGHTS: StudioLight[] = [
 	},
 ];
 
+// Frontal illumination for illusion mode: the camera sits between the objects
+// and the projection wall, so the rig lights the cloud from the viewer's side.
+const ILLUSION_LIGHTS: StudioLight[] = [
+	{
+		id: "illusion-key",
+		name: "Illusion Key",
+		type: "spot",
+		position: [3.4, 4.4, 4.6],
+		targetPosition: [0, 1.8, 1.4],
+		color: "#ffffff",
+		intensity: 4.5,
+		distance: 25,
+		angle: 0.95,
+		penumbra: 0.55,
+		enabled: true,
+		castShadow: false,
+	},
+	{
+		id: "illusion-fill",
+		name: "Illusion Fill",
+		type: "spot",
+		position: [-3.6, 3.6, 4.4],
+		targetPosition: [0, 1.8, 1.2],
+		color: "#e2e8f0",
+		intensity: 3.0,
+		distance: 25,
+		angle: 1.05,
+		penumbra: 0.7,
+		enabled: true,
+		castShadow: false,
+	},
+	{
+		id: "illusion-rim",
+		name: "Illusion Rim",
+		type: "spot",
+		position: [0, 4.6, -1.8],
+		targetPosition: [0, 2.0, 2.0],
+		color: "#c7d2fe",
+		intensity: 2.2,
+		distance: 25,
+		angle: 0.9,
+		penumbra: 0.6,
+		enabled: true,
+		castShadow: false,
+	},
+];
+
 // Default objects for sandbox mode
 const DEFAULT_SANDBOX_OBJECTS: StudioObject[] = [
 	{
@@ -197,7 +256,11 @@ export default function App() {
 
 	// Anamorphic state
 	const [anamorphicPresetIndex, setAnamorphicPresetIndex] = useState(0);
-	const [anamorphicAccuracy, setAnamorphicAccuracy] = useState(0);
+	const [anamorphicView, setAnamorphicView] =
+		useState<AnamorphicViewMetrics | null>(null);
+	const [viewpointLocked, setViewpointLocked] = useState(false);
+	const [explorationMode, setExplorationMode] = useState(false);
+	const [showTargetOverlay, setShowTargetOverlay] = useState(true);
 
 	// RGB challenge state
 	const [rgbChallengeIndex, setRgbChallengeIndex] = useState(0);
@@ -261,8 +324,8 @@ export default function App() {
 					),
 				);
 			},
-			onAnamorphicAccuracyChange: (acc) => {
-				setAnamorphicAccuracy(acc);
+			onAnamorphicViewChange: (metrics) => {
+				setAnamorphicView(metrics);
 			},
 			onPerformanceUpdate: (nextMetrics) => {
 				if (modeRef.current === "pagp")
@@ -372,6 +435,17 @@ export default function App() {
 				newMode === "multilight",
 			);
 
+			// Leaving anamorphic mode: unlock the camera and drop the ghost target.
+			if (newMode !== "illusion") {
+				engineRef.current?.setViewpointLock(false);
+				engineRef.current?.setExplorationMode(false);
+				engineRef.current?.clearAnamorphicSweetSpot();
+				engineRef.current?.setLightFixturesVisible(true);
+				setViewpointLocked(false);
+				setExplorationMode(false);
+				setAnamorphicView(null);
+			}
+
 			if (newMode === "puzzle") {
 				loadPuzzleLevel(puzzleLevelIndex, 1);
 				return;
@@ -396,16 +470,22 @@ export default function App() {
 				setActiveCameraPreset("orbit");
 			} else if (newMode === "illusion") {
 				const preset = ANAMORPHIC_PRESETS[anamorphicPresetIndex];
-				engine.setObjects(preset.objects);
-				engine.setLights(DEFAULT_SANDBOX_LIGHTS);
-				setObjects(preset.objects);
-				setLights(DEFAULT_SANDBOX_LIGHTS);
-				engine.setAnamorphicSweetSpot(
-					preset.sweetSpot.position,
-					preset.sweetSpot.lookAt,
-				);
-				engine.setCameraPreset("orbit");
-				setActiveCameraPreset("orbit");
+				const presetObjects = cloneObjects(preset.objects);
+				const presetLights = cloneLights(ILLUSION_LIGHTS);
+				engine.setObjects(presetObjects);
+				engine.setLights(presetLights);
+				engine.setLightFixturesVisible(false);
+				engine.setAnamorphicSweetSpot(preset.sweetSpot);
+				engine.setViewpointLock(false);
+				engine.setExplorationMode(false);
+				setObjects(presetObjects);
+				setLights(presetLights);
+				setViewpointLocked(false);
+				setExplorationMode(false);
+				setShowTargetOverlay(true);
+				setAnamorphicView(null);
+				engine.goToSweetSpot(false);
+				setActiveCameraPreset("anamorphic_peep");
 			} else if (newMode === "multilight") {
 				// 3 overlapping colored lights + interesting sculpture
 				const multiObjects: StudioObject[] = [
@@ -481,17 +561,80 @@ export default function App() {
 		(preset: (typeof ANAMORPHIC_PRESETS)[0]) => {
 			const idx = ANAMORPHIC_PRESETS.findIndex((p) => p.id === preset.id);
 			if (idx !== -1) setAnamorphicPresetIndex(idx);
-			if (engineRef.current) {
-				engineRef.current.setObjects(preset.objects);
-				setObjects(preset.objects);
-				engineRef.current.setAnamorphicSweetSpot(
-					preset.sweetSpot.position,
-					preset.sweetSpot.lookAt,
-				);
-				setSelectedObject(null);
-			}
+
+			const engine = engineRef.current;
+			if (!engine) return;
+
+			const presetObjects = cloneObjects(preset.objects);
+			engine.setObjects(presetObjects);
+			engine.setLights(cloneLights(ILLUSION_LIGHTS));
+			engine.setLightFixturesVisible(false);
+			engine.setAnamorphicSweetSpot(preset.sweetSpot);
+			engine.setViewpointLock(false);
+			engine.setExplorationMode(false);
+			setObjects(presetObjects);
+			setLights(cloneLights(ILLUSION_LIGHTS));
+			setSelectedObject(null);
+			setViewpointLocked(false);
+			setExplorationMode(false);
+			setShowTargetOverlay(true);
+			setAnamorphicView(null);
+			engine.goToSweetSpot(false);
+			setActiveCameraPreset("anamorphic_peep");
 		},
 		[],
+	);
+
+	const handleGoToSweetSpot = useCallback(() => {
+		const engine = engineRef.current;
+		if (!engine) return;
+		engine.setExplorationMode(false);
+		setExplorationMode(false);
+		engine.goToSweetSpot(true);
+		setViewpointLocked(true);
+		setActiveCameraPreset("anamorphic_peep");
+	}, []);
+
+	const handleToggleViewpointLock = useCallback(() => {
+		const engine = engineRef.current;
+		if (!engine) return;
+		const next = !viewpointLocked;
+		engine.setViewpointLock(next);
+		setViewpointLocked(next);
+		if (next) {
+			engine.setExplorationMode(false);
+			setExplorationMode(false);
+		}
+	}, [viewpointLocked]);
+
+	const handleToggleExploration = useCallback(() => {
+		const engine = engineRef.current;
+		if (!engine) return;
+		const next = !explorationMode;
+		engine.setExplorationMode(next);
+		setExplorationMode(next);
+		if (next) {
+			engine.setViewpointLock(false);
+			setViewpointLocked(false);
+		}
+	}, [explorationMode]);
+
+	const handleToggleTargetOverlay = useCallback(() => {
+		setShowTargetOverlay((previous) => !previous);
+	}, []);
+
+	const activeAnamorphicPreset = ANAMORPHIC_PRESETS[anamorphicPresetIndex];
+	const anamorphicIntegrity = useMemo(
+		() =>
+			computeObjectIntegrity(
+				objects,
+				activeAnamorphicPreset.objects,
+			),
+		[objects, activeAnamorphicPreset],
+	);
+	const illusionResult = useMemo(
+		() => finalizeIllusionScore(anamorphicView, anamorphicIntegrity),
+		[anamorphicView, anamorphicIntegrity],
 	);
 
 	// Object transformation actions
@@ -612,8 +755,20 @@ export default function App() {
 			| "anamorphic_peep"
 			| "puzzle_overview",
 	) => {
+		const engine = engineRef.current;
 		setActiveCameraPreset(preset);
-		engineRef.current?.setCameraPreset(preset);
+
+		if (preset === "anamorphic_peep") {
+			handleGoToSweetSpot();
+			return;
+		}
+
+		// Any manual viewpoint releases the anamorphic lock / auto-orbit.
+		engine?.setViewpointLock(false);
+		engine?.setExplorationMode(false);
+		setViewpointLocked(false);
+		setExplorationMode(false);
+		engine?.setCameraPreset(preset);
 	};
 
 	// Snapshot & JSON Export / Import
@@ -755,16 +910,32 @@ export default function App() {
 			)}
 
 			{mode === "illusion" && (
-				<AnamorphicOverlay
-					presets={ANAMORPHIC_PRESETS}
-					activePreset={ANAMORPHIC_PRESETS[anamorphicPresetIndex]}
-					onSelectPreset={handleSelectAnamorphicPreset}
-					accuracy={anamorphicAccuracy}
-					onLockPeepHole={() =>
-						handleSetCameraPreset("anamorphic_peep")
-					}
-					onFreeOrbit={() => handleSetCameraPreset("orbit")}
-				/>
+				<>
+					<SweetSpotMarker
+						targetImage={activeAnamorphicPreset.targetImage}
+						revealColor={activeAnamorphicPreset.revealColor}
+						showTarget={showTargetOverlay}
+						accuracy={anamorphicView?.accuracy ?? 0}
+						solved={illusionResult.passed}
+						onGoToSweetSpot={handleGoToSweetSpot}
+					/>
+					<AnamorphicOverlay
+						presets={ANAMORPHIC_PRESETS}
+						activePreset={activeAnamorphicPreset}
+						onSelectPreset={handleSelectAnamorphicPreset}
+						view={anamorphicView}
+						score={illusionResult.score}
+						passed={illusionResult.passed}
+						integrity={illusionResult.integrity}
+						viewpointLocked={viewpointLocked}
+						explorationMode={explorationMode}
+						showTargetOverlay={showTargetOverlay}
+						onGoToSweetSpot={handleGoToSweetSpot}
+						onToggleViewpointLock={handleToggleViewpointLock}
+						onToggleExploration={handleToggleExploration}
+						onToggleTargetOverlay={handleToggleTargetOverlay}
+					/>
+				</>
 			)}
 
 			{mode === "multilight" && (

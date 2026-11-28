@@ -222,7 +222,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                 className={`px-2.5 py-0.5 rounded-md border text-xs font-semibold bg-rose-950/80 text-rose-300 border-rose-700/80 hover:bg-rose-900 transition-colors flex items-center gap-1`}
               >
                 <Sparkles className="w-3 h-3 text-rose-400" />
-                <span>Peep-Hole Lock</span>
+                <span>Sweet Spot</span>
               </button>
             )}
           </div>
