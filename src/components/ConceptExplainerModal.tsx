@@ -75,7 +75,7 @@ export const ConceptExplainerModal: React.FC<ConceptExplainerModalProps> = ({ on
               <strong className="text-slate-100">ShadowPlay Experiential Learning Studio</strong>
             </div>
             <div className="text-slate-400">
-              Team: <span className="text-indigo-300 font-mono">1RV23CS245 · 246 · 257 · 000</span>
+              Team: <span className="text-indigo-300 font-mono">1RV23CS245 · 246 · 257 · 303</span>
             </div>
           </div>
 

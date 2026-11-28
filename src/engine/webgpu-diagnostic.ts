@@ -123,6 +123,7 @@ export async function detectWebGpuSupport(): Promise<WebGpuStatus> {
       deviceVendor: info.vendor || adapter.name || 'Hardware Accelerated',
       maxTextureDimension2D: device.limits.maxTextureDimension2D || 8192,
       computeEnabled: true,
+      timestampQueries: Boolean(adapter.features?.has?.('timestamp-query')),
       executionMode: 'WebGPU Native (WGSL)',
     };
     return cachedStatus;
